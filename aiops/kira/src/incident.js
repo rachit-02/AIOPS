@@ -52,14 +52,27 @@ async function manifestState() {
   return /name:\s*SEED_BUG_NULL_SHIPPING\s*\n\s*value:\s*"true"/.test(text);
 }
 
+/**
+ * Flip the flag in the manifest. Returns false if it was already correct.
+ *
+ * MUST tolerate CRLF. On Windows the working tree is checked out with \r\n, so
+ * a literal `\n              value:` needle never matches — and the failure is
+ * SILENT: the caller reports "already in the target state" and carries on while
+ * the cluster stays on the old value. That is exactly how this broke the first
+ * time it ran for real. Matching whitespace generically avoids the whole class
+ * of problem, and reusing the captured indentation preserves the file's style.
+ */
+export const flagPattern = (value) =>
+  new RegExp(`(name:\\s*${FLAG}\\s*[\\r\\n]+\\s*value:\\s*)"${value}"`);
+
 async function setManifest(enabled) {
   const path = join(REPO_ROOT, MANIFEST);
   const text = await readFile(path, 'utf8');
-  const from = enabled ? '"false"' : '"true"';
-  const to = enabled ? '"true"' : '"false"';
-  const needle = `- name: ${FLAG}\n              value: ${from}`;
-  if (!text.includes(needle)) return false; // already in the desired state
-  await writeFile(path, text.replace(needle, `- name: ${FLAG}\n              value: ${to}`), 'utf8');
+  const from = enabled ? 'false' : 'true';
+  const to = enabled ? 'true' : 'false';
+  const re = flagPattern(from);
+  if (!re.test(text)) return false; // already in the desired state
+  await writeFile(path, text.replace(re, `$1"${to}"`), 'utf8');
   return true;
 }
 

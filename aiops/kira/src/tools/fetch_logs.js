@@ -96,9 +96,23 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
       // Our services log an `err` object for unhandled exceptions; the access
       // log carries `error` for handled failures.
       const errMsg = line?.err?.message || line.error || line.msg || '(no message)';
-      const key = fingerprint(errMsg);
+      // Group by (event, message), not message alone.
+      //
+      // The shared logger emits TWO lines per failed request: an
+      // `unhandled_error` carrying the exception and stack, and a `request`
+      // access-log line carrying the same error text and the 500 status.
+      // Collapsing them into one group double-counts every failure - 14 failed
+      // requests look like 28. Splitting them keeps the arithmetic honest and
+      // makes the distinction visible: only the exception line has a stack.
+      const event = line.msg || '(none)';
+      const key = `${event}|${fingerprint(errMsg)}`;
       if (!groups.has(key)) {
         groups.set(key, {
+          event,
+          // `unhandled_error` means this service THREW. `request` alone means
+          // it only recorded a status - which is what a proxy does when the
+          // failure happened somewhere downstream.
+          has_stack_trace: Boolean(line?.err?.stack),
           message: String(errMsg).slice(0, 300),
           count: 0,
           first_seen: null,
@@ -124,12 +138,21 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
   }
 
   const distinct = [...groups.values()].sort((a, b) => b.count - a.count).slice(0, config.maxLogLines);
+  const withStack = distinct.filter((g) => g.has_stack_trace);
 
   return {
     source: 'loki',
     service,
     level_filter: level,
     query_window: time_range,
+    // THE ORIGIN SIGNAL, and the most reliable one available.
+    // A service that threw has a stack trace. A service that merely forwarded
+    // a downstream failure has only access-log lines. This distinguishes an
+    // origin from its blast radius far more dependably than comparing error
+    // counts, which are distorted by rate-window extrapolation and by counter
+    // resets at deploy time.
+    threw_exceptions: withStack.length > 0,
+    exception_count: withStack.reduce((n, g) => n + g.count, 0),
     // The exact LogQL used, so a human can paste it into Grafana and reproduce
     // what Kira saw. Reproducibility is what separates evidence from assertion.
     logql: `${selector} | json`,
@@ -140,6 +163,13 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
       total === 0
         ? 'No matching log lines. Either the service is not logging at this level, the window ' +
           'is wrong, or the service is not the one failing. This is not by itself evidence of health.'
-        : null,
+        : withStack.length > 0
+          ? `This service THREW ${withStack.reduce((n, g) => n + g.count, 0)} exception(s) with stack traces - ` +
+            'it is where the failure originated, not merely where it was observed. ' +
+            'Note that each failed request produces TWO log lines (the exception and the access-log ' +
+            'entry), so count distinct events, not raw lines.'
+          : 'No stack traces here - only access-log entries recording a status. This service ' +
+            'OBSERVED failures but did not throw them, which is the signature of a proxy or caller ' +
+            'propagating a downstream error.',
   };
 }

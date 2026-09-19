@@ -98,11 +98,30 @@ or a wrong time window, not proof that nothing is wrong.
 
 1. **Scope it.** Use `fetch_metrics` across the affected services to see which
    are erroring and how badly.
-2. **Separate origin from collateral.** Use the call graph above. If `order`,
-   `gateway` and `frontend` all show errors at the same rate and the same time,
-   the origin is the deepest service in the chain — `order` — and the other two
-   are propagating. Compare error *counts*: a propagating service cannot have
-   more errors than its source.
+2. **Separate origin from collateral.** Two pieces of evidence, in this order
+   of reliability:
+
+   **(a) Stack traces — the decisive one.** `fetch_logs` reports
+   `threw_exceptions` per service. A service that *threw* has an
+   `unhandled_error` event with a stack trace. A service that merely forwarded
+   somebody else's failure has only `request` access-log entries recording a
+   status. **The origin is the service that threw.** Proxies do not produce
+   stack traces for faults that happened downstream.
+
+   **(b) The call graph — corroboration.** The origin should also be the
+   deepest affected service in the chain above. If `order`, `gateway` and
+   `frontend` all show errors, `order` is the candidate and the other two sit
+   upstream of it.
+
+   **Do NOT rank services by error count to find the origin.** Those counts
+   come from different pods with counters that reset at different times, and
+   they are routinely inconsistent — in a measured run, three services that had
+   each seen the same 14 failures reported 15, 7 and 2. Use counts to describe
+   *scale*, never to establish *causality*.
+
+   Also note that each failed request produces **two** log lines in this system
+   (the exception and the access-log entry), so an exception count of 28 means
+   14 failed requests. Count events, not lines.
 3. **Check liveness.** Use `fetch_health`. Restarts or `CrashLoopBackOff` point
    at a crash or resource problem; healthy pods returning errors point at a
    code path, not infrastructure.

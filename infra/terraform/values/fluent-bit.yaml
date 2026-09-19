@@ -88,7 +88,13 @@ config:
         # per request) and would create a stream per HTTP request, which is the
         # single fastest way to destroy a Loki instance. It stays a FIELD,
         # queried at read time:
-        #     {namespace="aiops-dev"} | json | request_id="abc-123"
+        #     {kubernetes_namespace_name="aiops-dev"} | json | request_id="abc-123"
+        #
+        # MIND THE LABEL NAMES. This plugin FLATTENS the nested keys below:
+        # $kubernetes['namespace_name'] becomes the label
+        # `kubernetes_namespace_name`, not `namespace_name` and not `namespace`.
+        # Querying the wrong name returns an empty result with no error, so
+        # Phase 5's fetch_logs tool must use these exact names.
         label_keys          $kubernetes['namespace_name'],$kubernetes['pod_name'],$kubernetes['container_name'],$level
         # Would turn every Kubernetes label into a Loki label. Off, for the
         # cardinality reason above.

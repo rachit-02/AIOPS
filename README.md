@@ -156,7 +156,14 @@ cd infra/terraform && terraform init && terraform apply
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 ```
 
-Verify logs are flowing — in Grafana → Explore → Loki, run `{namespace="logging"}`.
+Verify logs are flowing — in Grafana → Explore → Loki, run
+`{kubernetes_namespace_name="logging"}`.
+
+> **Label names are flattened.** Fluent Bit's Loki output turns
+> `$kubernetes['namespace_name']` into the label `kubernetes_namespace_name`.
+> Querying `{namespace="..."}` returns an empty result **with no error** — a
+> silent failure worth knowing about, since Phase 5's `fetch_logs` builds
+> LogQL queries programmatically.
 
 ### Tear it down
 
@@ -207,7 +214,8 @@ no metrics — a failure that looks like the application not exporting anything.
 **Log labels are low-cardinality on purpose.** Loki indexes namespace, pod,
 container and level. `request_id` is deliberately a *field*, not a label: one
 value per request would create one Loki stream per request. It is queried at
-read time instead — `{namespace="aiops-dev"} | json | request_id="abc-123"` —
+read time instead —
+`{kubernetes_namespace_name="aiops-dev"} | json | request_id="abc-123"` —
 which is the same cardinality discipline applied to the Prometheus metric
 labels, for the same reason.
 

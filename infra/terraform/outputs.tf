@@ -25,6 +25,10 @@ output "verify_commands" {
     all_pods_running   = "kubectl get pods -A"
     prometheus_targets = "open http://localhost:9091/targets -- every listed target should be UP (control-plane scrapers are disabled on purpose)"
     loki_ready         = "kubectl -n logging exec deploy/loki -- wget -qO- localhost:3100/ready"
-    logs_flowing       = "In Grafana > Explore > Loki, run: {namespace=\"logging\"}"
+    # NOTE the label name: Fluent Bit's loki output flattens
+    # $kubernetes['namespace_name'] to kubernetes_namespace_name. Querying
+    # {namespace="..."} silently returns nothing -- verified against the
+    # running cluster.
+    logs_flowing = "In Grafana > Explore > Loki, run: {kubernetes_namespace_name=\"logging\"}"
   }
 }

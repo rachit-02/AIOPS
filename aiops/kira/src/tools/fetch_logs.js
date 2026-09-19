@@ -28,16 +28,21 @@ const CONTAINER_LABEL = 'kubernetes_container_name';
 export const definition = {
   name: 'fetch_logs',
   description:
-    'Query Loki for a service\'s application logs, grouped by distinct error message ' +
-    'with counts and example stack traces. Use this to find WHY a service is failing ' +
-    'once metrics have told you WHERE. This is the only tool that can show you a stack ' +
-    'trace or a specific failing code path.',
+    'Query Loki for application logs, grouped by distinct error message with counts and ' +
+    'example stack traces. Accepts one service or "all". Use it to find WHY a service is ' +
+    'failing once metrics have told you WHERE, and to identify WHICH service ORIGINATED a ' +
+    'failure: only the service that actually threw has a stack trace, while services merely ' +
+    'propagating a downstream error have access-log entries alone. In "all" mode the ' +
+    'by_service breakdown answers "who threw?" in a single call.',
   input_schema: {
     type: 'object',
     properties: {
       service: {
         type: 'string',
-        description: 'Service name (frontend, gateway, auth, product, order, orders, user).',
+        description:
+          'Service name (frontend, gateway, auth, product, order, orders, user), or "all" to ' +
+          'survey every service at once. Use "all" first when you do not yet know which service ' +
+          'threw - it reports threw_exceptions per service, which identifies the origin directly.',
       },
       time_range: { type: 'string', description: 'Lookback window, e.g. "15m", "1h". Default "15m".' },
       level: {
@@ -61,14 +66,20 @@ const fingerprint = (msg) =>
     .slice(0, 200);
 
 export async function run({ service, time_range = '15m', level = 'error' }) {
-  if (!config.services.includes(service)) {
-    throw new Error(`unknown service "${service}". Known: ${config.services.join(', ')}`);
+  if (service !== 'all' && !config.services.includes(service)) {
+    throw new Error(`unknown service "${service}". Known: ${config.services.join(', ')}, or "all"`);
   }
   const seconds = parseTimeRange(time_range);
   const end = Date.now() * 1e6;
   const start = end - seconds * 1e9;
 
-  let selector = `{${NS_LABEL}="${config.namespace}", ${CONTAINER_LABEL}="${service}"}`;
+  // With "all", drop the container label so every service in the namespace is
+  // surveyed in one query, making "who actually threw?" a single tool call
+  // instead of seven.
+  let selector =
+    service === 'all'
+      ? `{${NS_LABEL}="${config.namespace}"}`
+      : `{${NS_LABEL}="${config.namespace}", ${CONTAINER_LABEL}="${service}"}`;
   // `level` is an indexed label (Fluent Bit promotes it), so filtering on it
   // is cheap - it narrows streams rather than scanning lines.
   if (level !== 'all') selector = selector.replace('}', `, level="${level}"}`);
@@ -84,7 +95,13 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
   const groups = new Map();
   let total = 0;
 
+  // Per-service tallies, so "all" mode can attribute exceptions to a service.
+  // Without this the survey would say that SOMETHING threw but not what, which
+  // is the one question it exists to answer.
+  const perService = new Map();
+
   for (const s of streams) {
+    const svcName = s.stream?.[CONTAINER_LABEL] ?? 'unknown';
     for (const [tsNano, raw] of s.values) {
       total++;
       let line;
@@ -131,6 +148,11 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
       }
       const g = groups.get(key);
       g.count++;
+
+      if (!perService.has(svcName)) perService.set(svcName, { service: svcName, lines: 0, exceptions: 0 });
+      const ps = perService.get(svcName);
+      ps.lines++;
+      if (line?.err?.stack) ps.exceptions++;
       const iso = new Date(Number(tsNano) / 1e6).toISOString();
       if (!g.first_seen || iso < g.first_seen) g.first_seen = iso;
       if (!g.last_seen || iso > g.last_seen) g.last_seen = iso;
@@ -153,6 +175,15 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
     // resets at deploy time.
     threw_exceptions: withStack.length > 0,
     exception_count: withStack.reduce((n, g) => n + g.count, 0),
+    // Only meaningful in "all" mode, and the reason that mode exists: the
+    // service(s) with exceptions > 0 are the ORIGIN; services with lines but
+    // zero exceptions merely observed and forwarded the failure.
+    by_service:
+      service === 'all'
+        ? [...perService.values()]
+            .sort((a, b) => b.exceptions - a.exceptions || b.lines - a.lines)
+            .map((s) => ({ ...s, threw: s.exceptions > 0 }))
+        : undefined,
     // The exact LogQL used, so a human can paste it into Grafana and reproduce
     // what Kira saw. Reproducibility is what separates evidence from assertion.
     logql: `${selector} | json`,

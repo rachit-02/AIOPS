@@ -14,9 +14,34 @@ export const config = {
   namespace: process.env.AIOPS_NAMESPACE || 'aiops-dev',
   kubeContext: process.env.KUBE_CONTEXT || 'kind-aiops-local',
 
-  // User-specified for this project. Sonnet 5 is a deliberate cost choice:
-  // a full three-tool diagnosis lands around $0.12 rather than ~$0.30.
-  model: process.env.KIRA_MODEL || 'claude-sonnet-5',
+  // ---- Model provider -------------------------------------------------------
+  // "ollama" (default) runs locally and costs nothing. "anthropic" is more
+  // reliable at the three-way correlation this agent depends on, and is the
+  // recommendation for anyone who has API access. See src/model/index.js.
+  provider: process.env.KIRA_PROVIDER || 'ollama',
+
+  ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+  ollamaModel: process.env.OLLAMA_MODEL || 'qwen2.5:7b',
+
+  // Ollama's DEFAULT context window is much smaller than qwen2.5 supports, and
+  // silently truncates rather than erroring. The system prompt plus three tool
+  // results comfortably exceeds the default, and what gets dropped is the tail
+  // - which is where the evidence is. Set explicitly.
+  ollamaNumCtx: Number(process.env.OLLAMA_NUM_CTX) || 16384,
+
+  // A 7B model on CPU is slow and a cold start reloads ~5GB from disk; the
+  // first call can take a minute before any tokens appear.
+  ollamaTimeoutMs: Number(process.env.OLLAMA_TIMEOUT_MS) || 300000,
+
+  anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
+
+  // ---- Reliability ------------------------------------------------------------
+  // Smaller models sometimes answer from the system prompt alone instead of
+  // calling tools. When that happens Kira is told what she has not yet checked
+  // and asked again, up to this many times, before the run is failed. A
+  // confident answer built on partial evidence is worse than no answer, so the
+  // failure is loud rather than silent.
+  maxToolNudges: Number(process.env.KIRA_MAX_TOOL_NUDGES) || 2,
 
   // Generous ceiling, not a target - billing is on tokens actually produced.
   // Too low truncates a diagnosis mid-sentence and wastes the whole run.

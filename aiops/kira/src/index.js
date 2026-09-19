@@ -3,7 +3,7 @@
  * Kira CLI.
  *
  *   node src/index.js "the order service is throwing errors, investigate"
- *   node src/index.js --check          # verify all three data sources are reachable
+ *   node src/index.js --check          # verify the model and all three data sources
  *
  * Kira runs as a plain host process, outside the cluster she is diagnosing.
  * That separation is deliberate: a diagnostic tool that lives inside the thing
@@ -12,6 +12,7 @@
 import { investigate } from './agent.js';
 import { config } from './config.js';
 import { runTool } from './tools/index.js';
+import { createModelClient } from './model/index.js';
 
 const DEFAULT_INCIDENT =
   'Users report that some checkout attempts are failing. Investigate the aiops-dev ' +
@@ -24,6 +25,17 @@ const DEFAULT_INCIDENT =
 async function check() {
   console.log('\nChecking Kira\'s three data sources:\n');
   const checks = [
+    // The model is checked FIRST and by name: "Kira found nothing wrong",
+    // "Loki is unreachable" and "Ollama is not running" must never be
+    // indistinguishable from one another.
+    [
+      `model          -> ${config.provider}:${config.provider === 'ollama' ? config.ollamaModel : config.anthropicModel}`,
+      async () => {
+        const c = createModelClient();
+        const r = await c.chat({ system: 'Reply with the single word OK.', messages: [{ role: 'user', text: 'ping' }], tools: [] });
+        if (!r.text) throw new Error('model returned no text');
+      },
+    ],
     ['fetch_metrics  → Prometheus  ' + config.prometheusUrl, () => runTool('fetch_metrics', { service: 'all', time_range: '5m' })],
     ['fetch_logs     → Loki        ' + config.lokiUrl, () => runTool('fetch_logs', { service: 'order', time_range: '5m', level: 'all' })],
     ['fetch_health   → Kubernetes  ' + config.kubeContext, () => runTool('fetch_health', { service: 'all' })],
@@ -40,8 +52,8 @@ async function check() {
   }
   console.log(
     ok
-      ? '\nAll three sources reachable.\n'
-      : '\nAt least one source is unreachable. Is the cluster up (scripts/cluster-up.sh)?\n',
+      ? '\nModel and all three data sources reachable.\n'
+      : '\nSomething is unreachable. Is the cluster up (scripts/cluster-up.sh) and Ollama running?\n',
   );
   return ok;
 }

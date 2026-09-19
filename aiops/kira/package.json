@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Kira - AIOps diagnostic agent. Correlates metrics, logs and pod health to explain incidents. Diagnoses only; never remediates.",
+  "description": "Kira - AIOps diagnostic agent. Correlates metrics, logs and pod health to explain incidents. Runs on a local Ollama model by default; Anthropic optional. Diagnoses only; never remediates.",
   "scripts": {
     "start": "node src/index.js",
     "check": "node src/index.js --check",
-    "demo": "bash test/incident-demo.sh"
+    "demo": "bash test/incident-demo.sh",
+    "check:tools": "node test/tool-calling-check.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",

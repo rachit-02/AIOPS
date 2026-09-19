@@ -9,7 +9,7 @@ suggestion. A human decides and acts.
 
 ```
               ┌──────────────────────────────┐
-  incident ──▶│  Claude (claude-sonnet-5)    │
+  incident ──▶│  qwen2.5:7b via Ollama       │  (local, free)
   (one line)  │  system prompt: prompts/     │
               └──────────────┬───────────────┘
                              │ tool use, agentic loop
@@ -37,28 +37,78 @@ counts, computed rates and percentiles — not raw dumps. That is both a cost
 control (a 5,000-line log dump is expensive in tokens) and an accuracy one
 (three significant lines get buried in five thousand routine ones).
 
+## Which model?
+
+Kira runs on a **local Ollama model by default — no API key, no billing**.
+The provider is a one-line swap ([`src/model/`](src/model/)); nothing else in
+the agent, the tools or the system prompt changes.
+
+| | `ollama` (default) | `anthropic` |
+|---|---|---|
+| Model | `qwen2.5:7b` | `claude-sonnet-5` |
+| Cost | free | ~$0.12 / diagnosis |
+| Speed | ~40–50s (CPU) | ~20–30s |
+| Tool calling | works, needs guardrails | reliable |
+| Correlation accuracy | correct root cause; minor factual slips | consistently precise |
+
+**If you have API access, use Sonnet 5.** This agent's whole value is
+cross-referencing three signals and separating an origin from its blast
+radius, and that is precisely where the gap shows. Measured on the seeded
+incident, qwen2.5:7b identified the root cause correctly but listed a service
+as affected that had zero errors — a fabricated claim inside an otherwise
+sound diagnosis. It is good enough to demonstrate the architecture; it is not
+good enough to trust unreviewed.
+
+```bash
+KIRA_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... npm start
+```
+
 ## Setup
 
 ```bash
-cd aiops/kira
-npm install
-export ANTHROPIC_API_KEY=sk-ant-...
-
-npm run check     # verifies all three data sources are reachable
+# Ollama (default) - no key needed
+ollama pull qwen2.5:7b
+cd aiops/kira && npm install
+npm run check
 ```
 
-`--check` tests each source **separately and by name**, because "Kira found
-nothing wrong" and "Kira could not reach Loki" must never look the same.
+`--check` tests the model **and** each data source **separately and by name**,
+because "Kira found nothing wrong", "Loki is unreachable" and "Ollama is not
+running" must never look the same.
+
+> **Memory.** qwen2.5:7b needs ~5GB, and the kind cluster wants ~5.5GB. On a
+> 16GB machine that is tight but works; a cold start takes ~50s while the model
+> loads from disk.
 
 ## Run
 
 ```bash
+# Verify tool calling works with your model BEFORE a real investigation
+npm run check:tools
+
 # Ask about a specific incident
 node src/index.js "checkout is failing for some users, investigate the last 15 minutes"
 
 # Or the full scripted demo: creates a real incident, then diagnoses it cold
 npm run demo
 ```
+
+### Why `check:tools` exists
+
+A 7B model is far less dependable at tool use than a frontier model, and the
+failure is quiet — it answers plausibly from the system prompt instead of
+calling anything. [`test/tool-calling-check.js`](test/tool-calling-check.js)
+isolates the mechanism with stub tools and no cluster dependency, and answers
+five questions: does it emit a call, with correct arguments, does it chain
+after reading a result, and **does the loop's enforcement actually refuse an
+unevidenced answer**.
+
+That last pair is tested with a stub client that always answers without
+calling tools. An earlier version induced it by telling the real model "do not
+use tools" — which stopped working the moment the prompt was cleaned up and
+the model started behaving. Whether the loop refuses a toolless answer is
+*our* logic and must be deterministic, not contingent on a model misbehaving
+on cue.
 
 ## The system prompt is a file, not a string
 
@@ -99,19 +149,35 @@ three-tool diagnosis on `claude-sonnet-5` costs roughly **$0.10–0.15**.
 
 ## Design decisions
 
-**A hand-written agentic loop, not the SDK's tool runner.** The SDK's
-`beta.messages.tool_runner` would do this in less code. The loop in
-[`src/agent.js`](src/agent.js) is written out deliberately: the project exists
-to demonstrate the agentic pattern, every tool call must be individually
-traceable, and it avoids depending on a beta API surface.
+**A hand-written agentic loop, not an SDK tool runner.** The loop in
+[`src/agent.js`](src/agent.js) is provider-agnostic, which is what lets the
+same code drive Ollama and Anthropic despite entirely different wire formats.
+It also keeps every tool call individually traceable.
 
-**Adaptive thinking with `display: "summarized"`.** Sonnet 5 returns empty
-thinking blocks by default; enabling summaries is what puts Kira's *reasoning*
-in the trace rather than only her conclusion.
+**Tool use is detected by the presence of tool calls, never by a stop reason.**
+Ollama reports `done_reason: "stop"` *even while calling tools* — there is no
+equivalent of Anthropic's `stop_reason: "tool_use"`. Branching on the stop
+reason silently ends the investigation after the first tool call.
 
-**Prompt caching on the system prompt and tool definitions.** They are
-byte-identical across turns and runs, so after the first call they are read
-from cache instead of re-billed at full rate.
+**The loop refuses an answer built on partial evidence.** A 7B model will
+sometimes answer straight from the system prompt, which contains the service
+topology and therefore enough material for a confident, plausible, entirely
+unevidenced diagnosis — the worst failure mode for a diagnostic tool, because
+it looks exactly like success. When the model tries to conclude early it is
+told *by name* which tools it has not called and asked again (twice by
+default); if it still will not comply the answer is stamped
+`[INCOMPLETE INVESTIGATION]` and the process exits non-zero. Nudges appear in
+the trace, because a run that needed them is a weaker result than one that did
+not.
+
+**`num_ctx` is set explicitly.** Ollama's default context is far smaller than
+qwen2.5 supports and it truncates *silently* — and what gets dropped is the
+tail, which is where the tool results are.
+
+**Arguments are validated before execution.** Anthropic can enforce schemas
+server-side with `strict: true`; Ollama has no equivalent, so it happens in the
+loop. A bad argument comes back to the model as a correctable error rather than
+a TypeError deep inside a tool.
 
 **Tool failures are reported to the model, not thrown.** A data source being
 unreachable is itself diagnostic information — Kira can say "Loki did not
@@ -130,8 +196,11 @@ prompt.
 
 | Lever | Effect |
 |---|---|
+| **Local Ollama by default** | **$0 — no API billing at all** |
 | Tools aggregate before returning | a log dump becomes ~20 grouped messages |
 | `maxLogLines` cap (default 40) | bounds the worst case |
-| Prompt caching | system prompt + tools billed once, then cached |
 | `maxTurns` hard stop (default 12) | a runaway loop fails loudly instead of spending |
-| `claude-sonnet-5` | ~$0.12/diagnosis vs ~$0.30 on Opus 5 |
+| Prompt caching (Anthropic path) | system prompt + tools billed once, then cached |
+
+A measured run on `qwen2.5:7b`: 3 tool calls, 2 turns, 41.8s, 8,222 in /
+498 out tokens, **free**. The same run on `claude-sonnet-5` costs ~$0.12.

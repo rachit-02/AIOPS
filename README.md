@@ -18,7 +18,7 @@ applies every fix. That boundary is deliberate and is defended in
 | 2 | CI — GitHub Actions, parallel builds, push to GHCR, tag write-back | **Done** |
 | 3 | Terraform — kind cluster + ArgoCD, Prometheus/Grafana, Loki, Fluent Bit | **Done** |
 | 4 | GitOps — ArgoCD app-of-apps, ServiceMonitors, dashboard as code | **Done** |
-| 5 | Kira — local agent + 3 scoped tools (Anthropic API) | **Done** |
+| 5 | Kira — local agent + 3 scoped tools (Ollama, local) | **Done** |
 | 6 | React UI + incident demo | Not started |
 
 ---
@@ -666,13 +666,23 @@ the node containers.
 If disk is tight, `docker builder prune -f` and `docker image prune -a -f`
 usually reclaim several GB.
 
-### The one thing that does cost money
+### Cost: zero
 
-**Kira's Anthropic API calls** (Phase 5). Everything else is free. Using
-`claude-sonnet-5`, a full three-tool diagnosis costs roughly **$0.12**;
-development and demos land in the region of $10–15 total. Costs are contained
-by capping `fetch_logs` to a bounded time window and line count, and by prompt
-caching the stable system prompt and tool definitions.
+Kira runs on a **local Ollama model** (`qwen2.5:7b`), so there is no API
+billing and no key to manage. The entire project — build, deploy, observe,
+diagnose — costs nothing beyond electricity.
+
+A measured diagnosis: 3 tool calls, 2 turns, 41.8s, **free**.
+
+**If you have Anthropic API access, `claude-sonnet-5` is the better model** and
+is a one-line swap (`KIRA_PROVIDER=anthropic`). The three-way correlation this
+agent depends on is exactly where a 7B model's limits show: on the seeded
+incident it found the root cause correctly but also listed a service as
+affected that had zero errors. Roughly $0.12 per diagnosis. See
+[aiops/kira/README.md](aiops/kira/README.md#which-model).
+
+> **Memory.** qwen2.5:7b needs ~5GB alongside the cluster's ~5.5GB. On 16GB
+> that works but is tight; the first call takes ~50s while the model loads.
 
 ---
 

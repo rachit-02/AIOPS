@@ -1,126 +1,169 @@
 /**
- * Kira's agentic loop.
+ * Kira's agentic loop — provider-agnostic.
  *
- * WHY A HAND-WRITTEN LOOP RATHER THAN THE SDK's TOOL RUNNER
- * The SDK provides `client.beta.messages.tool_runner`, which would drive this
- * automatically and in less code. This loop is written out deliberately:
- *   - the whole point of the project is demonstrating the agentic pattern, and
- *     a loop you can read is a loop you can defend in a viva;
- *   - every tool call has to be visible in a trace with its arguments, which
- *     is most direct when we own the dispatch;
- *   - it avoids depending on a beta API surface.
- * The trade is that error handling and message bookkeeping are ours to get
- * right - which is what the comments below are about.
+ * Nothing here knows whether the model is a local qwen2.5:7b or Sonnet 5; it
+ * talks to the normalised client interface in src/model/. That seam is what
+ * makes "only the model client changed" a verifiable claim rather than a
+ * description.
+ *
+ * WHY A HAND-WRITTEN LOOP
+ * A provider SDK helper would be less code, but the project exists to
+ * demonstrate the agentic pattern, every tool call has to be individually
+ * traceable, and a hand-written loop is the only version that works
+ * identically across two providers with different wire formats.
+ *
+ * THE RELIABILITY PROBLEM THIS LOOP SOLVES
+ * A 7B model is markedly less dependable at tool use than a frontier model. It
+ * will sometimes answer straight from the system prompt — which contains the
+ * service topology and therefore enough material to produce a confident,
+ * plausible, entirely unevidenced diagnosis. That is the worst possible
+ * failure mode for a diagnostic tool, because it looks exactly like success.
+ * So the loop refuses to accept a final answer until all three signals have
+ * been gathered: it names what is missing, asks again, and fails loudly if the
+ * model still will not comply.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Anthropic from '@anthropic-ai/sdk';
 
 import { config } from './config.js';
 import { toolDefinitions, runTool, summarise } from './tools/index.js';
+import { createModelClient } from './model/index.js';
 import { Trace } from './trace.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+/** The three signals a diagnosis is not allowed to be published without. */
+export const REQUIRED_TOOLS = ['fetch_metrics', 'fetch_logs', 'fetch_health'];
 
 /** The system prompt lives in a reviewable Markdown file, never inline. */
 export function loadSystemPrompt() {
   return readFileSync(join(HERE, '..', 'prompts', 'kira-system-prompt.md'), 'utf8');
 }
 
-export async function investigate(incident, { model = config.model, verbose = true } = {}) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is not set. export it, or put it in aiops/kira/.env');
+/**
+ * Validate arguments before executing.
+ *
+ * Anthropic can enforce this server-side with `strict: true`; Ollama has no
+ * equivalent, so it has to happen here. Without it a missing required field
+ * surfaces as a confusing TypeError deep inside a tool instead of a message
+ * the model can actually correct.
+ */
+function validateArgs(name, args) {
+  const def = toolDefinitions.find((t) => t.name === name);
+  if (!def) return `Unknown tool "${name}". Available: ${REQUIRED_TOOLS.join(', ')}.`;
+  if (args?.__unparseable !== undefined) return `Arguments were not valid JSON: ${args.__unparseable}`;
+  for (const req of def.input_schema.required ?? []) {
+    if (args?.[req] === undefined || args[req] === null || args[req] === '') {
+      return `Missing required argument "${req}" for ${name}.`;
+    }
   }
+  return null;
+}
 
-  const client = new Anthropic();
-  const trace = new Trace({ incident, model });
+/**
+ * @param {object} opts
+ * @param {object} [opts.client] Inject a model client. Used by the test suite
+ *   to exercise the enforcement path deterministically: whether the loop
+ *   refuses an unevidenced answer is OUR logic, and must not be tested by
+ *   hoping a model misbehaves on cue.
+ */
+export async function investigate(incident, { verbose = true, client: injected } = {}) {
+  const client = injected ?? createModelClient();
+  const trace = new Trace({ incident, model: `${client.provider}:${client.model}`, pricePerMTok: client.pricePerMTok });
   const system = loadSystemPrompt();
 
-  const messages = [{ role: 'user', content: incident }];
+  /** Provider-neutral conversation history. */
+  const messages = [{ role: 'user', text: incident }];
+  const called = new Set();
+  let nudgesLeft = config.maxToolNudges;
   let answer = '';
   let turn = 0;
+  let emptyTurns = 0;
 
   while (turn < config.maxTurns) {
     turn++;
     trace.turn(turn);
 
-    const response = await client.messages.create({
-      model,
-      max_tokens: config.maxTokens,
-      // Cached prefix: the system prompt and tool definitions are byte-identical
-      // on every turn and every run, so after the first call they are read from
-      // cache rather than re-billed at full rate. Render order is
-      // tools -> system -> messages, so a breakpoint here covers both.
-      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-      tools: toolDefinitions,
-      messages,
-      // Adaptive thinking: Claude decides how much to reason per turn. Root
-      // cause analysis across three correlated sources is exactly the kind of
-      // work that benefits. `summarized` surfaces a readable version of that
-      // reasoning so the trace shows HOW she got there, not just the answer -
-      // without it, Sonnet 5 returns empty thinking blocks by default.
-      thinking: { type: 'adaptive', display: 'summarized' },
-    });
+    const res = await client.chat({ system, messages, tools: toolDefinitions });
+    trace.addUsage(res.usage);
+    if (res.thinking && verbose) trace.thinking(res.thinking);
 
-    trace.addUsage(response.usage);
+    messages.push({ role: 'assistant', text: res.text, toolCalls: res.toolCalls, raw: res.raw });
 
-    // Guard before reading content: a refused turn returns HTTP 200 with no
-    // usable body, and blindly indexing into content would throw something
-    // unhelpful.
-    if (response.stop_reason === 'refusal') {
-      throw new Error(`Model declined the request (${response.stop_details?.category ?? 'unspecified'}).`);
+    // NOTE: detected by the PRESENCE of tool calls, never by a stop reason.
+    // Ollama reports done_reason "stop" even while calling tools, so branching
+    // on the stop reason would end the loop after the very first call.
+    if (res.toolCalls.length > 0) {
+      emptyTurns = 0;
+      if (res.text && verbose) trace.say(res.text);
+
+      const results = await Promise.all(
+        res.toolCalls.map(async (call) => {
+          const handle = trace.toolStart(call.name, call.args);
+          const invalid = validateArgs(call.name, call.args);
+          if (invalid) {
+            trace.toolEnd(handle, { ok: false, error: invalid });
+            // Handed back to the model so it can retry with correct arguments,
+            // rather than aborting the investigation.
+            return { role: 'tool', toolCallId: call.id, name: call.name, isError: true, content: `Error: ${invalid}` };
+          }
+          try {
+            const result = await runTool(call.name, call.args);
+            called.add(call.name);
+            trace.toolEnd(handle, { ok: true, result, summary: summarise(call.name, result) });
+            return { role: 'tool', toolCallId: call.id, name: call.name, content: JSON.stringify(result) };
+          } catch (err) {
+            trace.toolEnd(handle, { ok: false, error: err.message });
+            // A data source being unreachable is itself diagnostic information.
+            // Kira should be able to say so, not die with a stack trace.
+            return { role: 'tool', toolCallId: call.id, name: call.name, isError: true, content: `Tool failed: ${err.message}` };
+          }
+        }),
+      );
+      messages.push(...results);
+      continue;
     }
 
-    // The assistant turn must be appended WHOLE - including thinking blocks.
-    // Reconstructing it from just the text would discard the thinking blocks,
-    // which must be echoed back unchanged for the next turn on the same model.
-    messages.push({ role: 'assistant', content: response.content });
-
-    const toolUses = [];
-    for (const block of response.content) {
-      if (block.type === 'thinking' && verbose) trace.thinking(block.thinking);
-      else if (block.type === 'text') {
-        answer = block.text; // last text block wins; on the final turn this is the diagnosis
-        if (verbose && response.stop_reason === 'tool_use') trace.say(block.text);
-      } else if (block.type === 'tool_use') toolUses.push(block);
+    // ---- No tool calls: the model is trying to conclude -------------------
+    if (!res.text.trim()) {
+      // Neither text nor tool calls. Usually a small model losing the thread.
+      if (++emptyTurns > 2) throw new Error('Model returned empty responses three turns running; aborting.');
+      messages.push({ role: 'user', text: 'You returned an empty response. Call the tools you still need, or give your final answer.' });
+      continue;
     }
 
-    if (response.stop_reason !== 'tool_use') break;
+    const missing = REQUIRED_TOOLS.filter((t) => !called.has(t));
+    if (missing.length === 0) {
+      answer = res.text;
+      break;
+    }
 
-    // Execute every requested tool. Claude may ask for several at once; running
-    // them concurrently is both faster and the behaviour the API expects.
-    const results = await Promise.all(
-      toolUses.map(async (block) => {
-        const handle = trace.toolStart(block.name, block.input);
-        try {
-          const result = await runTool(block.name, block.input);
-          trace.toolEnd(handle, { ok: true, result, summary: summarise(block.name, result) });
-          return { type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) };
-        } catch (err) {
-          trace.toolEnd(handle, { ok: false, error: err.message });
-          // Report the failure back to the model rather than aborting. A data
-          // source being unreachable is itself diagnostic information, and
-          // Claude can say so instead of the run dying with a stack trace.
-          return {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            is_error: true,
-            content: `Tool failed: ${err.message}`,
-          };
-        }
-      }),
-    );
+    if (nudgesLeft > 0) {
+      nudgesLeft--;
+      trace.nudge(missing, nudgesLeft);
+      // Explicit and mechanical. A vague "please use your tools" is routinely
+      // ignored by a 7B model; naming the exact tools and forbidding a
+      // conclusion is what actually lands.
+      messages.push({
+        role: 'user',
+        text:
+          `STOP. You have not called: ${missing.join(', ')}. ` +
+          'Your instructions require all three signals before any conclusion, because each one is ' +
+          'misleading alone. Do not answer yet. Call the missing tool(s) now.',
+      });
+      continue;
+    }
 
-    // ALL tool results go back in ONE user message. Splitting them across
-    // several messages is accepted by the API but teaches the model to stop
-    // making parallel calls.
-    messages.push({ role: 'user', content: results });
+    // Out of nudges: fail loudly rather than return an unevidenced answer.
+    answer =
+      res.text +
+      `\n\n[INCOMPLETE INVESTIGATION] Never called: ${missing.join(', ')}. ` +
+      'This diagnosis is not supported by all three signals and must not be trusted.';
+    break;
   }
 
-  if (turn >= config.maxTurns) {
-    answer += `\n\n[stopped: hit the ${config.maxTurns}-turn limit]`;
-  }
+  if (turn >= config.maxTurns) answer += `\n\n[stopped: hit the ${config.maxTurns}-turn limit]`;
 
   const summary = trace.finish(answer);
   return { answer, trace: summary, turns: turn };

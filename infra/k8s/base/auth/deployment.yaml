@@ -19,7 +19,7 @@ spec:
       containers:
         - name: auth
           # Image name is a PLACEHOLDER. The overlay's `images:` block rewrites
-          # both the registry (to ECR) and the tag (to the commit SHA that CI
+          # both the registry (to GHCR) and the tag (to the commit SHA that CI
           # built). Never edit this line by hand - CI owns it.
           image: aiops/auth
           ports:

@@ -1,7 +1,36 @@
-# AWS + GitHub setup for CI (Phase 2)
+# DESIGN NOTE — the original AWS design (superseded)
 
-Manual, one-time setup. Everything here must exist **before** the first push to
-`main`, or the `build` job fails at the "Assume AWS role" step.
+> ## ⚠️ This is not the current architecture
+>
+> This document describes the **original** Phase 2 design, which pushed images
+> to Amazon ECR using a GitHub OIDC federated IAM role. **None of it is
+> deployed.** The project was deliberately re-targeted to run entirely on one
+> machine — GHCR instead of ECR, kind instead of EKS, Loki instead of
+> CloudWatch — to remove a recurring cost of roughly **$105/month** (EKS
+> control plane + NAT gateway) from a student project.
+>
+> **It is kept because the reasoning is worth defending in a viva**, in
+> particular:
+>
+> - **Why the OIDC trust policy's `sub` condition is security-critical.**
+>   Without it, *any* GitHub Actions workflow in *any* repository on GitHub
+>   could assume the role. This is one of the most common real-world OIDC
+>   misconfigurations, and the analysis below still stands.
+> - **How to scope an IAM policy minimally**, and why exactly one action
+>   (`ecr:GetAuthorizationToken`) legitimately requires `Resource: "*"` while
+>   every action that touches image data is ARN-scoped.
+> - **What CI deliberately could not do** — no delete permissions, no cluster
+>   credentials — which is the same blast-radius argument the current GHCR
+>   pipeline makes.
+>
+> For what actually runs today, see [the README](../../README.md).
+
+---
+
+## AWS + GitHub setup for CI (as originally designed)
+
+Manual, one-time setup. Everything here had to exist **before** the first push
+to `main`, or the `build` job would fail at the "Assume AWS role" step.
 
 **Cost of this phase: effectively zero.** ECR's free tier covers 500 MB/month
 for 12 months; beyond that it is $0.10/GB/month. With the lifecycle policy in

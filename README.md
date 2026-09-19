@@ -15,7 +15,7 @@ applies every fix. That boundary is deliberate and is defended in
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | Monorepo + local dev (7 services, Postgres, Prometheus, Grafana) | **Done** |
-| 2 | CI — GitHub Actions, parallel builds, push to ECR, tag write-back | **Done** |
+| 2 | CI — GitHub Actions, parallel builds, push to GHCR, tag write-back | **Done** |
 | 3 | Terraform — VPC, EKS, ECR, ArgoCD + kube-prometheus-stack | Not started |
 | 4 | GitOps — ArgoCD app-of-apps | Not started |
 | 5 | Kira — Bedrock Agent + 3 scoped Lambda tools | Not started |
@@ -133,15 +133,15 @@ docker compose down -v            # stop AND wipe the DB (re-runs db/init on nex
    │  check   │   Nothing is built until this passes.
    └────┬─────┘
         ▼
-   ┌──────────┐   7 images in parallel → ECR, tagged with the short SHA.
-   │  build   │   Auth via GitHub OIDC — no long-lived AWS keys.
+   ┌──────────┐   7 images in parallel → GHCR, tagged with the short SHA.
+   │  build   │   Auth via the built-in GITHUB_TOKEN — zero secrets.
    └────┬─────┘
         ▼
    ┌──────────┐   rewrites image tags in infra/k8s/overlays/dev,
    │  gitops  │   commits as github-actions[bot], pushes to main.
    └────┬─────┘   *** CI STOPS HERE. It has no cluster credentials. ***
         ▼
-   ArgoCD (in EKS) notices the changed tag and syncs — Phase 4
+   ArgoCD (in kind) notices the changed tag and syncs — Phase 4
 ```
 
 **Why the pipeline stops at a Git commit.** CI's last act is to write down
@@ -177,15 +177,23 @@ Three layers stop it, any one of which would suffice:
 `latest` is mutable, so two pods on the "same version" can run different code
 and a rollback has no fixed target. A SHA tag ties a running container to the
 exact commit that produced it — which is what Kira needs in Phase 5 to
-correlate "error rate rose at 14:02" with "deploy of `a1b2c3d` at 14:01". ECR
-repos are created with `IMMUTABLE` tags so this is enforced, not just intended.
+correlate "error rate rose at 14:02" with "deploy of `a1b2c3d` at 14:01".
+GHCR packages are immutable per tag for the same reason.
 
-### Setup
+### Setup — there isn't any
 
-CI needs ECR repositories and an IAM role before its first run. Exact commands,
-with the IAM permissions explained line by line, are in
-**[docs/aws-setup.md](docs/aws-setup.md)**. Cost of that setup is **under
-$0.25/month**; no compute runs in AWS until Phase 3.
+The pipeline requires **no repository secrets and no external accounts**.
+`GITHUB_TOKEN` is minted per run, scoped to this repository, and expires when
+the job ends; `packages: write` is the only extra permission. The GHCR packages
+are public, so the kind cluster pulls them anonymously — no pull secrets
+either.
+
+This is a genuine simplification over the original ECR design, which needed an
+OIDC identity provider, a federated IAM role, a trust policy and two secrets
+configured before the first run. That design is preserved as a
+[design note](docs/design-notes/original-aws-design.md), because the IAM
+scoping and OIDC trust-policy reasoning are worth defending even though they
+are no longer deployed.
 
 ---
 
@@ -266,10 +274,10 @@ scripts/smoke.sh  end-to-end verification
 infra/k8s/
   base/           environment-agnostic Deployments + Services for all 7
   overlays/dev/   image tags — THE FILE CI WRITES TO, and ArgoCD reads
-infra/terraform/  VPC, EKS, ECR, ArgoCD  (Phase 3)
+infra/terraform/  kind cluster + Helm platform  (Phase 3)
 aiops/            Kira agent + Lambdas   (Phase 5)
 docs/aws-setup.md manual AWS/GitHub setup for CI
-.github/workflows/ci.yml  build → ECR → GitOps handoff
+.github/workflows/ci.yml  build → GHCR → GitOps handoff
 ```
 
 ## Contributing
@@ -277,7 +285,7 @@ docs/aws-setup.md manual AWS/GitHub setup for CI
 `main` is protected by convention: work happens on feature branches named
 `feat/<service>-<thing>` (e.g. `feat/order-idempotency-keys`) and merges via
 PR. Pull requests run lint and tests but **never** build or push images — only
-a merge to `main` reaches ECR.
+a merge to `main` publishes images.
 
 ---
 
@@ -349,8 +357,8 @@ machine" honest.
 but `node:22-alpine` still carries a full Node runtime. Switching to a
 distroless base (`gcr.io/distroless/nodejs22`) or a Node single-executable
 build would roughly halve this. Deliberately **not** done: the added build
-complexity isn't worth it at this scale, and ECR storage for a project this
-size is negligible. Worth mentioning as the next optimisation if asked.
+complexity isn't worth it at this scale, and registry storage for a project
+this size is negligible. Worth mentioning as the next optimisation if asked.
 
 ---
 

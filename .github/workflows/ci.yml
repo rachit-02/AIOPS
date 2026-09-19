@@ -106,8 +106,15 @@ jobs:
       - name: Install lint tooling
         run: npm ci --prefix services
 
+      # MUST run from services/. ESLint v9's flat config is resolved relative to
+      # the WORKING DIRECTORY, not the target path, and eslint.config.js lives
+      # in services/ (not the repo root). Running this from the repo root fails
+      # with "couldn't find an eslint.config.js file" -- which is exactly how it
+      # failed the first time, because the local check was run from inside
+      # services/ and CI runs from the root.
       - name: Lint
-        run: npx --prefix services eslint services/${{ matrix.package }}
+        working-directory: services
+        run: npx eslint ${{ matrix.package }}
 
       - name: Install package deps
         run: npm ci --prefix services/${{ matrix.package }}

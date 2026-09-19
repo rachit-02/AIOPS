@@ -18,7 +18,7 @@ applies every fix. That boundary is deliberate and is defended in
 | 2 | CI — GitHub Actions, parallel builds, push to GHCR, tag write-back | **Done** |
 | 3 | Terraform — kind cluster + ArgoCD, Prometheus/Grafana, Loki, Fluent Bit | **Done** |
 | 4 | GitOps — ArgoCD app-of-apps, ServiceMonitors, dashboard as code | **Done** |
-| 5 | Kira — local agent + 3 scoped tools (Anthropic API) | Not started |
+| 5 | Kira — local agent + 3 scoped tools (Anthropic API) | **Done** |
 | 6 | React UI + incident demo | Not started |
 
 ---
@@ -401,6 +401,61 @@ real debugging time here:
    the kustomize root, so both need `--load-restrictor LoadRestrictionsNone`.
    CI's verify gate caught the mismatch and refused to commit a tag bump — the
    gate doing exactly its job.
+
+---
+
+## Disaster recovery — rebuilt from nothing, verified
+
+The entire cluster was **deleted and recreated from scratch** to prove Git is
+genuinely the source of truth:
+
+```bash
+bash scripts/cluster-down.sh    # kind delete cluster + clear local TF state
+bash scripts/cluster-up.sh      # kind create + terraform apply
+```
+
+| Before | After |
+|---|---|
+| 36 pods across 9 namespaces | rebuilt to 23/23 Running |
+| `aiops-dev` on `:59b4b3a` | restored to `:59b4b3a` — **read from Git, not retyped** |
+| 2 ArgoCD Applications | both back, `Synced / Healthy` |
+
+Terraform installed the platform and planted **one** object, the root
+Application. ArgoCD then pulled everything else from `main` and rebuilt all 8
+workloads with **no manual intervention**.
+
+What survives and what does not, stated honestly:
+
+- **Survives:** every deployment, service, config, dashboard and image tag —
+  because all of it is in Git.
+- **Does not:** application *data*. The Postgres PVC goes with the cluster and
+  the schema re-initialises from `db/init/01-schemas.sql`. A disposable local
+  cluster is not a backup strategy, and this project does not pretend otherwise.
+
+### The bug this rebuild caught
+
+The root Application was originally declared in the argo-cd chart's
+`extraObjects`. That worked — but **only because ArgoCD was already installed
+when it was added.** On a clean cluster it fails:
+
+```
+resource mapping not found for kind "Application" in version "argoproj.io/v1alpha1"
+ensure CRDs are installed first
+```
+
+The Helm provider renders and validates the whole manifest set against the API
+server *before* applying, so a chart cannot reference a CRD it is installing in
+the same release. `kubernetes_manifest` has the same problem one step earlier —
+it needs the CRD at *plan* time.
+
+The root Application now lives in
+[`infra/k8s/argocd/root-application.yaml`](infra/k8s/argocd/root-application.yaml)
+and Terraform applies it as a separate step afterwards. Still declarative,
+still reviewable, still exactly one object wide.
+
+**This is the argument for rebuild tests.** The bug was invisible in a working
+cluster and would have surfaced only when someone tried to recreate the
+environment — which is the worst possible moment.
 
 ---
 

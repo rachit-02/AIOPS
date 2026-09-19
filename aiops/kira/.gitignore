@@ -1,0 +1,6 @@
+node_modules/
+.env
+# Investigation traces are run artefacts. One is committed as a worked example
+# (see README); the rest are local.
+traces/*.json
+!traces/example-*.json

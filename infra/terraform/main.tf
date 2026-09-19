@@ -114,3 +114,38 @@ resource "helm_release" "argocd" {
   timeout = 900
   wait    = true
 }
+
+# -----------------------------------------------------------------------------
+# 5. The bootstrap seed: the single root Application, applied AFTER ArgoCD.
+#
+# WHY THIS IS A kubectl CALL AND NOT A PROPER RESOURCE
+# The obvious options both fail here:
+#   - putting it in the chart's `extraObjects` fails on a CLEAN cluster,
+#     because the Helm provider renders and validates the whole manifest set
+#     against the API server before applying, and the Application CRD does not
+#     exist yet at that moment (this is a real failure that a destroy/recreate
+#     caught, not a hypothetical);
+#   - `kubernetes_manifest` from the kubernetes provider needs the CRD to exist
+#     at PLAN time, which on a fresh cluster it does not.
+#
+# So the one bootstrap object is applied imperatively, from a manifest that
+# still lives in Git and is still reviewable. `kubectl apply` is idempotent, so
+# re-running is safe, and the manifest's own hash is the trigger, so editing it
+# re-applies it.
+#
+# This is the documented GitOps exception, and it is exactly one object wide.
+# -----------------------------------------------------------------------------
+resource "terraform_data" "argocd_root_application" {
+  triggers_replace = {
+    manifest = filesha256("${path.module}/../k8s/argocd/root-application.yaml")
+  }
+
+  provisioner "local-exec" {
+    command = join(" ", [
+      "kubectl", "--context", "kind-${var.cluster_name}",
+      "apply", "-f", "${path.module}/../k8s/argocd/root-application.yaml",
+    ])
+  }
+
+  depends_on = [helm_release.argocd]
+}

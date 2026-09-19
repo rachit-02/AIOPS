@@ -1,0 +1,12 @@
+# Local Terraform state. Deliberately not committed even though the backend is
+# local: state can contain generated credentials, and a disposable cluster's
+# state has no value to anyone else.
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!example.tfvars
+crash.log
+
+# .terraform.lock.hcl is deliberately NOT ignored -- it pins provider checksums
+# the same way package-lock.json pins npm packages, and belongs in Git.

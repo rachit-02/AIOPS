@@ -1,0 +1,93 @@
+# Loki, single-binary mode -- the smallest deployment that is still a real Loki.
+#
+# The chart's DEFAULT topology is the scalable one (read/write/backend split,
+# plus memcached caches) aimed at production. Left at defaults on a laptop it
+# requests several GB and never schedules. Almost every setting below exists to
+# collapse that back down.
+
+deploymentMode: SingleBinary
+
+loki:
+  # Single-tenant. Multi-tenancy would require every query and push to carry an
+  # X-Scope-OrgID header, which buys nothing with one project on one laptop.
+  auth_enabled: false
+
+  commonConfig:
+    # Only one instance exists, so asking for more than one replica of each log
+    # stream would block writes forever.
+    replication_factor: 1
+
+  storage:
+    # Local disk instead of S3/GCS. The whole point of the pivot.
+    type: filesystem
+
+  # REQUIRED since chart v6: the chart refuses to install without an explicit
+  # schemaConfig. tsdb + v13 is the current recommended pairing.
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  limits_config:
+    retention_period: ${retention}
+    # A laptop that has been asleep replays older timestamps; rejecting them
+    # would silently drop exactly the logs being investigated.
+    reject_old_samples: false
+    # Guardrails so one chatty pod cannot fill the disk.
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+
+  # Ruler/alerting unused: anomalies are consumed by Kira, not by an alert route.
+  rulerConfig:
+    alertmanager_url: ""
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 768Mi }
+
+# ---- Everything below is DISABLED to fit on a laptop ------------------------
+
+# The scalable-mode components. Explicitly zeroed: if any default to >0 they
+# schedule alongside singleBinary and double the footprint.
+read: { replicas: 0 }
+write: { replicas: 0 }
+backend: { replicas: 0 }
+
+# THE BIG ONE. The chart's default chunk cache requests ~2GB of memcached on its
+# own -- more than a quarter of the RAM available to the whole cluster. At this
+# data volume the filesystem store is already fast enough to make caching moot.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+# The nginx gateway only exists to front a multi-component deployment. With a
+# single binary, clients talk to the `loki` Service on :3100 directly.
+gateway:
+  enabled: false
+
+# Synthetic log generator used to monitor Loki's own health -- noise here, and
+# it would pollute the log stream Kira reads.
+lokiCanary:
+  enabled: false
+
+test:
+  enabled: false
+
+# Loki ships its own dashboards/rules for self-monitoring; not needed, and they
+# would clutter the Grafana folder next to the project's real dashboards.
+monitoring:
+  dashboards: { enabled: false }
+  rules: { enabled: false }
+  serviceMonitor: { enabled: false }
+  selfMonitoring: { enabled: false }

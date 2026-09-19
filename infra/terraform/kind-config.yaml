@@ -1,0 +1,46 @@
+# kind cluster definition for the AIOps project.
+#
+# WHY THIS IS NOT TERRAFORM
+# The `tehcyx/kind` Terraform provider can create clusters, but its last release
+# was v0.11.0 (Feb 2025) and it bundles its own kind version, which lags current
+# Kubernetes node images. Cluster creation is a single idempotent command with no
+# state worth tracking, so it runs from the CLI against this declarative file.
+# Terraform owns the platform layer (the four Helm releases), which is where a
+# dependency graph and state genuinely earn their keep.
+#
+# Create:  kind create cluster --config infra/terraform/kind-config.yaml
+# Destroy: kind delete cluster --name aiops-local
+#
+# NOTE: node images are deliberately NOT pinned. kind ships a default node image
+# matching its own version; pinning one here is the most common way to get an
+# "unsupported node image" failure after a kind upgrade.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: aiops-local
+
+nodes:
+  # One control-plane + two workers. Two workers is the minimum that makes pod
+  # scheduling observable: replicas actually land on different nodes, so
+  # `kubectl get pods -o wide` shows real spread and Kira's fetch_health has
+  # more than one node to reason about.
+  - role: control-plane
+    # Host -> NodePort mappings. This is why we don't need an ingress controller:
+    # a handful of stable URLs for ~0 extra memory. NodePort Services are
+    # reachable on every node, so mapping them on the control-plane is enough.
+    #
+    # Host ports are deliberately DIFFERENT from docker-compose's (8087/3030/9090)
+    # so the two stacks can never be confused for one another.
+    extraPortMappings:
+      - { containerPort: 30080, hostPort: 8090, protocol: TCP }   # frontend
+      - { containerPort: 30030, hostPort: 3031, protocol: TCP }   # Grafana
+      - { containerPort: 30081, hostPort: 8091, protocol: TCP }   # ArgoCD UI
+      - { containerPort: 30090, hostPort: 9091, protocol: TCP }   # Prometheus
+  - role: worker
+  - role: worker
+
+# NO containerd registry configuration is needed.
+#
+# The GHCR packages for this project are PUBLIC, so containerd pulls them
+# anonymously over the internet exactly as it would from Docker Hub. If the
+# packages are ever switched to private, this is where a registry credential
+# would go -- plus an imagePullSecret referenced by each Deployment.

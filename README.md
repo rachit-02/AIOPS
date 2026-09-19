@@ -15,10 +15,10 @@ applies every fix. That boundary is deliberate and is defended in
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | Monorepo + local dev (7 services, Postgres, Prometheus, Grafana) | **Done** |
-| 2 | CI — GitHub Actions, parallel builds, push to ECR, tag write-back | Not started |
-| 3 | Terraform — VPC, EKS, ECR, ArgoCD + kube-prometheus-stack | Not started |
+| 2 | CI — GitHub Actions, parallel builds, push to GHCR, tag write-back | In progress |
+| 3 | Terraform — kind cluster + ArgoCD, Prometheus/Grafana, Loki, Fluent Bit | **Done** |
 | 4 | GitOps — ArgoCD app-of-apps | Not started |
-| 5 | Kira — Bedrock Agent + 3 scoped Lambda tools | Not started |
+| 5 | Kira — local agent + 3 scoped tools (Anthropic API) | Not started |
 | 6 | React UI + incident demo | Not started |
 
 ---
@@ -104,8 +104,112 @@ docker compose down -v            # stop AND wipe the DB (re-runs db/init on nex
 ### Unit tests
 
 ```bash
-cd services/_shared && npm ci && npm test    # 7 tests on the shared observability layer
+cd services/_shared && npm ci && npm test    # 8 tests on the shared observability layer
 ```
+
+---
+
+## Run on Kubernetes (kind)
+
+The compose stack above is the fast inner loop. This is the production-shaped
+environment: a real Kubernetes cluster with GitOps, three observability signals,
+and the platform Kira queries in Phase 5.
+
+### Prerequisites
+
+| Tool | Purpose |
+|---|---|
+| Docker Desktop | hosts the cluster nodes as containers |
+| [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) | creates the cluster |
+| kubectl | talks to it |
+| Terraform ≥ 1.5 | installs the platform charts |
+
+`winget install Kubernetes.kind Kubernetes.kubectl Hashicorp.Terraform`
+
+Helm itself is **not** required — the Terraform `helm` provider embeds it.
+
+### Bring it up
+
+```bash
+docker compose down            # the two stacks must not run together
+bash scripts/cluster-up.sh     # creates the cluster, then applies Terraform
+```
+
+That runs two steps, and it is worth knowing which is which:
+
+```bash
+# 1. The cluster — kind CLI, from a declarative config file
+kind create cluster --config infra/terraform/kind-config.yaml
+
+# 2. The platform — Terraform owns the four Helm releases
+cd infra/terraform && terraform init && terraform apply
+```
+
+| URL | What | Credentials |
+|---|---|---|
+| http://localhost:8091 | ArgoCD | `admin` / see command below |
+| http://localhost:3031 | Grafana (Prometheus **and** Loki) | `admin` / `admin` |
+| http://localhost:9091 | Prometheus | — |
+| http://localhost:8090 | Frontend (once Phase 4 deploys it) | — |
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+```
+
+Verify logs are flowing — in Grafana → Explore → Loki, run `{namespace="logging"}`.
+
+### Tear it down
+
+```bash
+bash scripts/cluster-down.sh          # or:
+kind delete cluster --name aiops-local
+```
+
+Deleting the cluster removes every container, volume and image it owned, so
+nothing survives to leak. The script also clears local Terraform state, which
+would otherwise describe releases in a cluster that no longer exists.
+
+### Why the cluster is created by the CLI and not by Terraform
+
+Terraform owns the **platform** (the four Helm releases), where a dependency
+graph and state genuinely earn their keep. Cluster creation is one idempotent
+command with no state worth tracking, and the only Terraform provider for kind
+is community-maintained with its last release in **February 2025** — it bundles
+its own kind version and lags current Kubernetes node images. Taking that
+dependency to save one command would be a bad trade.
+
+The honest framing for a viva: *Terraform is used where it adds value, not
+everywhere it could technically be used.*
+
+### What Terraform installs, and why each setting
+
+| Release | Namespace | Notable tuning |
+|---|---|---|
+| Loki `7.3.0` | `logging` | SingleBinary, filesystem store; **caches disabled** (the chart's default chunk cache alone requests ~2 GB) |
+| Fluent Bit `0.58.2` | `logging` | DaemonSet; CRI parser → JSON merge, so `level`/`service`/`request_id` are queryable |
+| kube-prometheus-stack `91.4.1` | `monitoring` | Alertmanager off; **control-plane scrapers off** (see below); Loki wired as a second Grafana datasource |
+| ArgoCD `10.9.2` | `argocd` | Dex off, ApplicationSet scaled to 0, plain HTTP behind NodePort |
+
+Three decisions worth defending:
+
+**Control-plane scrapers are disabled.** On kind, `kubeScheduler`,
+`kubeControllerManager`, `kubeEtcd` and `kubeProxy` bind to `127.0.0.1` inside
+the control-plane container and can never be scraped. Left enabled they sit
+permanently DOWN — and that is worse than untidy: it becomes permanent noise in
+every "is anything unhealthy?" answer, including Kira's. An agent taught that
+four red targets are normal is an agent taught to ignore evidence.
+
+**`serviceMonitorSelectorNilUsesHelmValues: false`.** This defaults to `true`,
+which silently restricts Prometheus to ServiceMonitors carrying the chart's own
+release labels. The Phase 4 ServiceMonitors would be ignored with no error and
+no metrics — a failure that looks like the application not exporting anything.
+
+**Log labels are low-cardinality on purpose.** Loki indexes namespace, pod,
+container and level. `request_id` is deliberately a *field*, not a label: one
+value per request would create one Loki stream per request. It is queried at
+read time instead — `{namespace="aiops-dev"} | json | request_id="abc-123"` —
+which is the same cardinality discipline applied to the Prometheus metric
+labels, for the same reason.
 
 ---
 
@@ -182,10 +286,17 @@ services/
   user/           profiles
 db/init/          schemas, roles, grants, seed data (runs on first Postgres start)
 observability/    Prometheus scrape config; Grafana datasource + dashboards as code
-scripts/smoke.sh  end-to-end verification
-infra/            Terraform            (Phase 3)
-aiops/            Kira agent + Lambdas (Phase 5)
-.github/workflows/ CI                  (Phase 2)
+scripts/
+  smoke.sh          end-to-end verification of the compose stack
+  cluster-up.sh     kind cluster + Terraform platform, in order
+  cluster-down.sh   tear it all down
+infra/terraform/
+  kind-config.yaml  cluster topology (1 control-plane + 2 workers, port maps)
+  main.tf           the 4 Helm releases
+  values/           one YAML per chart — reviewable, lintable, diffable
+infra/k8s/          kustomize base + overlays  (Phase 2 branch)
+aiops/              Kira agent + 3 scoped tools (Phase 5)
+.github/workflows/  CI                         (Phase 2 branch)
 ```
 
 ---
@@ -258,16 +369,78 @@ machine" honest.
 but `node:22-alpine` still carries a full Node runtime. Switching to a
 distroless base (`gcr.io/distroless/nodejs22`) or a Node single-executable
 build would roughly halve this. Deliberately **not** done: the added build
-complexity isn't worth it at this scale, and ECR storage for a project this
-size is negligible. Worth mentioning as the next optimisation if asked.
+complexity isn't worth it at this scale, and registry storage for a project
+this size is negligible. It does matter more now that kind pulls every image a
+second time into its node containers — see [Resource
+requirements](#resource-requirements).
 
 ---
 
-## Cost
+## Resource requirements
 
-**Phase 1 is free** — everything runs locally in Docker.
+This project runs **entirely on one machine**. There is no cloud infrastructure
+and no cloud bill. The constraint is local RAM and disk instead.
 
-AWS spending begins at Phase 3. Every cost will be flagged before it is built.
-Planned economies: a single NAT gateway rather than one per AZ, `t3.small`
-nodes, on-demand Bedrock calls only while testing Kira, and
-`terraform destroy` between work sessions.
+| Environment | RAM | Disk | Notes |
+|---|---|---|---|
+| `docker compose` (inner loop) | ~1.5 GB | ~3 GB | 7 services + Postgres + Prometheus + Grafana |
+| `kind` cluster (full platform) | **~5.5 GB** | **~5 GB** | + ArgoCD, Loki, Fluent Bit, kube-state-metrics |
+
+**Never run both at once.** Together they exceed what Docker is typically
+allocated, and the failure mode is confusing — pods get `OOMKilled` and look
+like application faults. `scripts/cluster-up.sh` refuses to start if the
+compose stack is up.
+
+Breakdown of the kind cluster (~25 pods):
+
+| Component | ~RAM |
+|---|---|
+| kind control-plane + 2 workers | 1.8 GB |
+| Prometheus + Grafana + exporters | 1.5 GB |
+| ArgoCD (Dex off, ApplicationSet scaled to 0) | 0.6 GB |
+| Loki + Fluent Bit | 0.6 GB |
+| 7 services (1 replica each) + Postgres | 0.9 GB |
+
+**Recommended minimum: 16 GB RAM**, with at least 8 GB allocated to Docker
+(10 GB is comfortable — set `memory=10GB` in `%USERPROFILE%\.wslconfig` on
+Windows). **12 GB free disk** on whichever drive holds Docker's VM image; kind
+does not share Docker's image store, so every image is pulled *again* inside
+the node containers.
+
+If disk is tight, `docker builder prune -f` and `docker image prune -a -f`
+usually reclaim several GB.
+
+### The one thing that does cost money
+
+**Kira's Anthropic API calls** (Phase 5). Everything else is free. Using
+`claude-sonnet-5`, a full three-tool diagnosis costs roughly **$0.12**;
+development and demos land in the region of $10–15 total. Costs are contained
+by capping `fetch_logs` to a bounded time window and line count, and by prompt
+caching the stable system prompt and tool definitions.
+
+---
+
+## Why this runs locally instead of on AWS
+
+The project was originally designed for AWS — VPC across 3 AZs, EKS, ECR,
+CloudWatch, and Kira as a Bedrock Agent with Lambda tools. It was then
+deliberately re-targeted to run entirely on one machine, to remove a recurring
+cost (~$105/month for the EKS control plane and NAT gateway alone) from a
+student project.
+
+| Original | Now | What was preserved |
+|---|---|---|
+| EKS | kind | Same manifests, same kustomize overlays |
+| ECR | GHCR | Same SHA-tagged immutable images |
+| CloudWatch | Loki | Same Fluent Bit shipper — only the output plugin changed |
+| Terraform → VPC/EKS | Terraform → Helm releases | Same IaC discipline, pinned versions, `apply`/`destroy` |
+| Bedrock Agent + Lambda | Local Node service + Anthropic API | Same 3 scoped tools, same narrow-tool principle |
+
+**The application code did not change.** Swapping the entire cloud substrate
+touched four comments across 7 services — the services never knew where their
+logs went or which cluster they ran on. That decoupling is the point.
+
+The original AWS design — including the scoped IAM policy and the GitHub OIDC
+trust policy — is preserved in Git history on the `feat/ci-ecr-pipeline`
+branch, and moves to `docs/design-notes/` when Phase 2 is re-cut for GHCR. The
+reasoning there is worth keeping even though it is no longer deployed.

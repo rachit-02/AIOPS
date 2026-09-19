@@ -1,0 +1,117 @@
+# kube-prometheus-stack: Prometheus + Grafana (+ Alertmanager, off by default).
+#
+# Two themes below: (a) shrink the production defaults to laptop size, and
+# (b) silence the scrape targets that structurally cannot work on kind.
+
+# =============================================================================
+# kind-SPECIFIC: disable control-plane component scraping.
+#
+# On a real cluster the scheduler, controller-manager, etcd and kube-proxy
+# expose metrics on a reachable interface. Under kind they bind to 127.0.0.1
+# inside the control-plane container, so Prometheus can never reach them and
+# they sit permanently DOWN.
+#
+# This matters beyond tidiness: four red targets would be permanent noise in
+# every "is anything unhealthy?" question -- including the ones Kira answers.
+# An agent that has to learn "those four are always broken, ignore them" is an
+# agent being trained to ignore evidence.
+# =============================================================================
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }
+kubeEtcd: { enabled: false }
+
+alertmanager:
+  # This project has no alert routes: anomalies are consumed by Kira and by a
+  # human reading Grafana, not paged to an on-call rotation. ~200MB saved.
+  enabled: ${enable_alertmanager}
+
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090 # -> localhost:9091 via kind-config.yaml
+
+  prometheusSpec:
+    retention: ${prometheus_retention}
+
+    # CRITICAL, and a classic silent failure.
+    # These default to `true`, which restricts Prometheus to ServiceMonitors
+    # carrying this Helm release's labels. The ServiceMonitors added in Phase 4
+    # for the 7 services would be silently ignored -- no error, just no metrics.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      # A hard ceiling. Unbounded, Prometheus grows until the kubelet evicts
+      # something else on the node -- usually an application pod, which then
+      # looks like an application fault.
+      limits: { memory: ${prometheus_memory_limit} }
+
+    # emptyDir rather than a PVC: retention is hours, and metrics surviving a
+    # cluster rebuild has no value when the cluster is disposable.
+    storageSpec: {}
+
+grafana:
+  adminPassword: ${grafana_admin_password}
+
+  service:
+    type: NodePort
+    nodePort: 30030 # -> localhost:3031 via kind-config.yaml
+
+  # Dashboards are ephemeral; they are provisioned from files, as in compose.
+  persistence:
+    enabled: false
+
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+  # BOTH SIGNALS IN ONE PLACE.
+  # Prometheus is wired automatically by the chart; Loki is added here so a
+  # human can pivot from a latency spike straight to the logs behind it --
+  # and can independently verify anything Kira claims, using the same two
+  # sources she queried. An AI diagnosis nobody can check is not evidence.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      url: http://loki.logging.svc.cluster.local:3100
+      jsonData:
+        maxLines: 1000
+
+  sidecar:
+    dashboards:
+      enabled: true
+      # Any ConfigMap labelled grafana_dashboard=1 in any namespace becomes a
+      # dashboard. Phase 4 ships the project's dashboards this way, so they
+      # arrive through GitOps like everything else.
+      searchNamespace: ALL
+      label: grafana_dashboard
+
+# node-exporter runs on every node; kube-state-metrics gives pod/deployment
+# state. Both are small and both feed the pod-health signal, so both stay.
+nodeExporter:
+  enabled: true
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+# Default alerting rules assume a production cluster (etcd quorum, control-plane
+# health) and would fire constantly on kind. The useful ones are kept.
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeScheduler: false
+    kubeControllerManager: false
+    kubeProxy: false

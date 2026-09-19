@@ -1,0 +1,62 @@
+# ArgoCD -- the GitOps engine that will own every application manifest from
+# Phase 4 onward.
+#
+# Trimmed for a laptop: the default install assumes a shared, multi-team,
+# SSO-backed deployment. Here there is one user and one repository.
+
+configs:
+  params:
+    # Serve plain HTTP. ArgoCD's default is HTTPS with a self-signed cert, which
+    # over a NodePort produces a redirect loop plus a browser warning. TLS
+    # protects traffic that leaves the machine; this never does.
+    server.insecure: true
+
+server:
+  service:
+    type: NodePort
+    nodePortHttp: 30081 # -> localhost:8091 via kind-config.yaml
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+# The reconciliation engine -- the component that actually compares Git to the
+# cluster. Given the most headroom of the ArgoCD components.
+controller:
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+
+# Clones the Git repo and renders manifests (runs `kustomize build`).
+repoServer:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+redis:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
+# ---- Disabled components -----------------------------------------------------
+
+dex:
+  # SSO/OIDC broker. There is one local user; the built-in admin account is
+  # sufficient. ~100MB.
+  enabled: false
+
+notifications:
+  # Slack/email/webhook notifications on sync events. Nothing is listening.
+  enabled: false
+
+applicationSet:
+  # Templates many Applications from a generator (per-cluster, per-branch...).
+  # Phase 4 uses a plain app-of-apps with a handful of Applications, which is
+  # both simpler and easier to explain.
+  #
+  # NOTE: chart 10.9.2 has NO `applicationSet.enabled` flag -- verified against
+  # `helm show values`. Scaling to zero is the only way to switch it off, and it
+  # is unambiguous: a Deployment showing 0/0 is a healthy, intentional state
+  # (desired == ready), not a degraded one. Contrast with a DOWN scrape target,
+  # which is indistinguishable from a real fault -- which is why those were
+  # removed entirely rather than left to sit red.
+  replicas: 0

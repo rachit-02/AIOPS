@@ -1,0 +1,111 @@
+# Fluent Bit -- ships every container's stdout to Loki.
+#
+# This chart replaces the CloudWatch leg of the original design. The ONLY thing
+# that changed in the pipeline is the OUTPUT plugin; the services still write
+# JSON to stdout and know nothing about where it goes.
+#
+# The parsing chain below is what makes Kira's fetch_logs tool useful rather
+# than a wall of text:
+#
+#   1. containerd wraps every line:  2026-09-19T08:33:36.877Z stdout F {"level":...}
+#   2. the `cri` multiline parser strips that wrapper, leaving the raw JSON
+#   3. the kubernetes filter's Merge_Log parses that JSON, promoting `level`,
+#      `service`, `request_id` and `msg` to real fields
+#   4. Loki indexes a few low-cardinality labels; everything else is queried
+#      with LogQL's json filter at read time
+#
+# Without step 3, a log line is an opaque string and Kira cannot correlate a
+# 500 response with the request_id that produced it.
+
+kind: DaemonSet # one pod per node, tailing that node's container logs
+
+resources:
+  requests: { cpu: 10m, memory: 32Mi }
+  limits: { memory: 128Mi }
+
+config:
+  service: |
+    [SERVICE]
+        Daemon            Off
+        Flush             1
+        Log_Level         info
+        Parsers_File      /fluent-bit/etc/parsers.conf
+        HTTP_Server       On
+        HTTP_Listen       0.0.0.0
+        HTTP_Port         2020
+        Health_Check      On
+
+  inputs: |
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*.log
+        # Unwraps the containerd CRI line format and reassembles any log entry
+        # split across multiple lines (Node.js stack traces, which are exactly
+        # the evidence Kira needs, arrive split).
+        multiline.parser  cri
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+        Refresh_Interval  5
+
+  filters: |
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_Tag_Prefix     kube.var.log.containers.
+        # Enriches each record with pod / namespace / container / labels by
+        # querying the Kubernetes API.
+        Kube_URL            https://kubernetes.default.svc:443
+        Merge_Log           On
+        Merge_Log_Key       log_processed
+        # Drop the raw string once the JSON has been parsed out of it --
+        # otherwise every line is stored twice.
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+
+    [FILTER]
+        Name                nest
+        Match               kube.*
+        # Merge_Log nests parsed JSON under log_processed; lift it to the record
+        # root so LogQL sees `level` rather than `log_processed.level`.
+        Operation           lift
+        Nested_under        log_processed
+
+  outputs: |
+    [OUTPUT]
+        Name                loki
+        Match               kube.*
+        Host                loki.logging.svc.cluster.local
+        Port                3100
+        Labels              job=fluent-bit
+        # LABEL CARDINALITY -- the same discipline as Prometheus metric labels.
+        # Each unique label combination is a separate Loki stream, and streams
+        # are expensive. These four are bounded: a namespace/pod/container set
+        # is finite, and `level` has ~4 values.
+        #
+        # request_id is deliberately NOT a label -- it is unbounded (one value
+        # per request) and would create a stream per HTTP request, which is the
+        # single fastest way to destroy a Loki instance. It stays a FIELD,
+        # queried at read time:
+        #     {kubernetes_namespace_name="aiops-dev"} | json | request_id="abc-123"
+        #
+        # MIND THE LABEL NAMES. This plugin FLATTENS the nested keys below:
+        # $kubernetes['namespace_name'] becomes the label
+        # `kubernetes_namespace_name`, not `namespace_name` and not `namespace`.
+        # Querying the wrong name returns an empty result with no error, so
+        # Phase 5's fetch_logs tool must use these exact names.
+        label_keys          $kubernetes['namespace_name'],$kubernetes['pod_name'],$kubernetes['container_name'],$level
+        # Would turn every Kubernetes label into a Loki label. Off, for the
+        # cardinality reason above.
+        auto_kubernetes_labels Off
+        line_format         json
+        Retry_Limit         5
+
+# Tolerate the control-plane taint so its logs are collected too. Without this
+# the DaemonSet silently skips the control-plane node and Kira would have a
+# blind spot on exactly the node running the API server.
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule

@@ -68,9 +68,14 @@ function validateArgs(name, args) {
  *   refuses an unevidenced answer is OUR logic, and must not be tested by
  *   hoping a model misbehaves on cue.
  */
-export async function investigate(incident, { verbose = true, client: injected } = {}) {
+export async function investigate(incident, { verbose = true, client: injected, onEvent = () => {} } = {}) {
   const client = injected ?? createModelClient();
-  const trace = new Trace({ incident, model: `${client.provider}:${client.model}`, pricePerMTok: client.pricePerMTok });
+  const trace = new Trace({
+    incident,
+    model: `${client.provider}:${client.model}`,
+    pricePerMTok: client.pricePerMTok,
+    onEvent,
+  });
   const system = loadSystemPrompt();
 
   /** Provider-neutral conversation history. */
@@ -98,8 +103,33 @@ export async function investigate(incident, { verbose = true, client: injected }
       emptyTurns = 0;
       if (res.text && verbose) trace.say(res.text);
 
+      // Deduplication is intra-turn ONLY, deliberately. Repeating a tool in a
+      // LATER turn is left alone: the model may legitimately want fresh data
+      // after seeing something, and caching across turns would hide a genuine
+      // change in the system while an investigation is running. Observed with
+      // qwen2.5:7b: it sometimes re-runs fetch_metrics on a later turn. That is
+      // inefficient rather than wrong, and it is visible in the trace.
+      //
+      // Smaller models sometimes emit the SAME call twice in one turn -
+      // observed: fetch_metrics(service=all, range=15m) requested twice in a
+      // single response. The reads are idempotent so it is harmless, but it
+      // doubles the work and clutters the trace. Identical calls within a turn
+      // share one execution; each tool_use_id still gets its own result,
+      // because the protocol requires one result per call.
+      const inFlight = new Map();
+
       const results = await Promise.all(
         res.toolCalls.map(async (call) => {
+          // Key must be order-independent: JSON.stringify preserves insertion
+          // order, so {service, time_range} and {time_range, service} would
+          // hash differently and defeat the dedupe entirely.
+          const dedupeKey = `${call.name}|${JSON.stringify(
+            Object.fromEntries(Object.entries(call.args ?? {}).sort(([a], [b]) => a.localeCompare(b))),
+          )}`;
+          if (inFlight.has(dedupeKey)) {
+            const shared = await inFlight.get(dedupeKey);
+            return { ...shared, toolCallId: call.id };
+          }
           const handle = trace.toolStart(call.name, call.args);
           const invalid = validateArgs(call.name, call.args);
           if (invalid) {
@@ -108,11 +138,15 @@ export async function investigate(incident, { verbose = true, client: injected }
             // rather than aborting the investigation.
             return { role: 'tool', toolCallId: call.id, name: call.name, isError: true, content: `Error: ${invalid}` };
           }
-          try {
+          const work = (async () => {
             const result = await runTool(call.name, call.args);
             called.add(call.name);
             trace.toolEnd(handle, { ok: true, result, summary: summarise(call.name, result) });
             return { role: 'tool', toolCallId: call.id, name: call.name, content: JSON.stringify(result) };
+          })();
+          inFlight.set(dedupeKey, work);
+          try {
+            return await work;
           } catch (err) {
             trace.toolEnd(handle, { ok: false, error: err.message });
             // A data source being unreachable is itself diagnostic information.
@@ -166,5 +200,6 @@ export async function investigate(incident, { verbose = true, client: injected }
   if (turn >= config.maxTurns) answer += `\n\n[stopped: hit the ${config.maxTurns}-turn limit]`;
 
   const summary = trace.finish(answer);
+  onEvent({ type: 'answer', answer, ...summary });
   return { answer, trace: summary, turns: turn };
 }

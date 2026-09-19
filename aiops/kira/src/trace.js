@@ -28,7 +28,14 @@ const c = process.stdout.isTTY
   : { dim: '', bold: '', cyan: '', green: '', red: '', yellow: '', reset: '' };
 
 export class Trace {
-  constructor({ incident, model, pricePerMTok = { input: 0, output: 0 } }) {
+  /**
+   * @param {(e: {type: string, [k: string]: any}) => void} [onEvent]
+   *   Structured mirror of the console output, so the dashboard can stream the
+   *   same trace to a browser. The console remains the source of truth for the
+   *   CLI; this is an additional consumer, not a replacement.
+   */
+  constructor({ incident, model, pricePerMTok = { input: 0, output: 0 }, onEvent = () => {} }) {
+    this.onEvent = onEvent;
     this.startedAt = new Date();
     this.incident = incident;
     this.model = model;
@@ -49,6 +56,7 @@ export class Trace {
 
   turn(n) {
     this.currentTurn = n;
+    this.onEvent({ type: 'turn', turn: n });
     console.log(`\n${c.dim}${'─'.repeat(28)} turn ${n} ${'─'.repeat(28)}${c.reset}`);
   }
 
@@ -56,6 +64,7 @@ export class Trace {
   thinking(text) {
     if (!text?.trim()) return;
     this.turns.push({ turn: this.currentTurn, type: 'thinking', text });
+    this.onEvent({ type: 'thinking', text });
     const wrapped = text.trim().split('\n').map((l) => `  ${c.dim}│${c.reset} ${l}`).join('\n');
     console.log(`  ${c.cyan}[reasoning]${c.reset}\n${wrapped}`);
   }
@@ -64,10 +73,12 @@ export class Trace {
   say(text) {
     if (!text?.trim()) return;
     this.turns.push({ turn: this.currentTurn, type: 'text', text });
+    this.onEvent({ type: 'say', text });
     console.log(`  ${c.dim}[says]${c.reset} ${text.trim().split('\n')[0].slice(0, 160)}`);
   }
 
   toolStart(name, args) {
+    this.onEvent({ type: 'tool_start', tool: name, args });
     console.log(`  ${c.yellow}▶ TOOL${c.reset} ${c.bold}${name}${c.reset}`);
     console.log(`    ${c.dim}args${c.reset}  ${JSON.stringify(args)}`);
     return { name, args, startedAt: Date.now() };
@@ -87,6 +98,7 @@ export class Trace {
       error: ok ? undefined : error,
     };
     this.toolCalls.push(record);
+    this.onEvent({ type: 'tool_end', tool: handle.name, args: handle.args, ok, summary, error, duration_ms: ms });
     if (ok) console.log(`    ${c.green}✓${c.reset} ${ms}ms  ${c.dim}→${c.reset} ${summary}`);
     else console.log(`    ${c.red}✗${c.reset} ${ms}ms  ${c.red}${error}${c.reset}`);
     return record;
@@ -100,6 +112,7 @@ export class Trace {
    */
   nudge(missing, remaining) {
     this.nudges.push({ turn: this.currentTurn, missing: [...missing], remaining });
+    this.onEvent({ type: 'nudge', missing: [...missing], remaining });
     console.log(
       `  ${c.yellow}! NUDGE${c.reset} model tried to conclude without: ${c.bold}${missing.join(', ')}${c.reset}` +
         `  ${c.dim}(${remaining} retr${remaining === 1 ? 'y' : 'ies'} left)${c.reset}`,

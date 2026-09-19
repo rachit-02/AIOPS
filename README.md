@@ -19,7 +19,7 @@ applies every fix. That boundary is deliberate and is defended in
 | 3 | Terraform — kind cluster + ArgoCD, Prometheus/Grafana, Loki, Fluent Bit | **Done** |
 | 4 | GitOps — ArgoCD app-of-apps, ServiceMonitors, dashboard as code | **Done** |
 | 5 | Kira — local agent + 3 scoped tools (Ollama, local) | **Done** |
-| 6 | React UI + incident demo | Not started |
+| 6 | React dashboard + Kira chat, on live cluster data | **Done** |
 
 ---
 
@@ -456,6 +456,42 @@ still reviewable, still exactly one object wide.
 **This is the argument for rebuild tests.** The bug was invisible in a working
 cluster and would have surfaced only when someone tried to recreate the
 environment — which is the worst possible moment.
+
+---
+
+## The dashboard
+
+A live instrument panel plus a terminal-style chat with Kira, at
+**http://localhost:5173**. Every number is read from the running cluster —
+there is no mock data path.
+
+```bash
+bash scripts/cluster-up.sh                        # cluster + platform
+cd aiops/kira      && npm install && npm run server   # API on :7777
+cd aiops/dashboard && npm install && npm run dev      # UI  on :5173
+bash scripts/traffic.sh                           # ambient load for the charts
+```
+
+Full detail, including the design rationale, is in
+[aiops/dashboard/README.md](aiops/dashboard/README.md).
+
+**Two things are more real than they look:**
+
+- **The incident button commits to Git.** A `kubectl` patch would be instant,
+  but ArgoCD's `selfHeal` reverts drift within ~3 minutes and the incident would
+  resolve itself mid-demo. Instead it edits the manifest, commits, pushes and
+  syncs — and the five pipeline stages light up as each one actually completes,
+  which turns a 30–90s wait into the clearest available explanation of how the
+  system works.
+- **Incident history is `git log`.** Every incident here is caused and resolved
+  by a commit, so Git already is the incident log. Each row carries its short
+  SHA and is verifiable with `git show`.
+
+**Why the dashboard needs a backend at all:** the browser cannot reach
+Prometheus or Loki (no CORS headers) or the Kubernetes API (needs a kubeconfig
+credential that must never reach a browser). The API server reuses Kira's own
+three tools rather than reimplementing the queries, so the agent and the UI
+share one definition of every metric.
 
 ---
 

@@ -6,7 +6,10 @@ metadata:
     app.kubernetes.io/name: order
     app.kubernetes.io/part-of: aiops
 spec:
-  replicas: 2                      # 2 = a rolling update never drops to zero capacity
+  # 1 replica, not 2: the whole platform shares a laptop. Rolling updates are
+  # still observable because maxUnavailable defaults to 25% -> rounds to a
+  # surge pod, so a new pod starts before the old one is removed.
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: order
@@ -18,37 +21,36 @@ spec:
     spec:
       containers:
         - name: order
-          # Image name is a PLACEHOLDER. The overlay's `images:` block rewrites
-          # both the registry (to GHCR) and the tag (to the commit SHA that CI
-          # built). Never edit this line by hand - CI owns it.
+          # PLACEHOLDER rewritten by the overlay's `images:` block, which CI
+          # owns. Never edit by hand.
           image: aiops/order
           ports:
             - name: http
               containerPort: 3000
+          env:
+            # SEEDED BUG toggle - see services/order/src/index.js.
+            # Flipping this to "true" and pushing IS the incident: ArgoCD rolls
+            # it out, so even breaking production happens through Git.
+            - name: SEED_BUG_NULL_SHIPPING
+              value: "false"
           envFrom:
             - configMapRef:
                 name: aiops-service-urls
-        - secretRef:
-            name: aiops-order-db        # DATABASE_URL (created in Phase 4)
-          # Liveness: process-only check. If this touched the database, one
-          # slow query would restart every pod and turn a blip into an outage.
+            - secretRef:
+                name: aiops-order-db
           livenessProbe:
             httpGet: { path: /health, port: http }
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
-          # Readiness: includes dependencies. A failing DB pulls the pod out of
-          # the Service's endpoints without killing it, so it can recover.
           readinessProbe:
             httpGet: { path: /ready, port: http }
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 2
-          # Sized for t3.small nodes (2 vCPU / ~1.7Gi allocatable). Requests
-          # drive scheduling; limits stop one service starving the others.
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits:   { cpu: 300m, memory: 256Mi }
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 300m, memory: 256Mi }
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

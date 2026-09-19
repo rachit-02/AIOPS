@@ -1,0 +1,197 @@
+{
+  "uid": "aiops-three-signals",
+  "title": "AIOps — Three Signals",
+  "tags": ["aiops"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(http_requests_total{namespace=\"aiops-dev\"}, job)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "SIGNAL 1 — POD HEALTH  (Kubernetes API, via kube-state-metrics)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Replicas ready / desired",
+      "description": "Source: the Kubernetes API. This is the signal that says 'the process is alive'. Note it stays green during the seeded-bug incident — which is exactly why it is never sufficient on its own.",
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kube_deployment_status_replicas_ready{namespace=\"aiops-dev\"}",
+          "legendFormat": "{{deployment}}"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Container restarts (cumulative)",
+      "description": "A rising line means CrashLoopBackOff or OOMKill. Flat during the seeded bug — the process never dies, it just returns 500s.",
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (container) (kube_pod_container_status_restarts_total{namespace=\"aiops-dev\"})",
+          "legendFormat": "{{container}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 2 }, "min": 0 } }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "SIGNAL 2 — METRICS  (Prometheus, scraped from each service's /metrics)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "collapsed": false
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Request rate",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job) (rate(http_requests_total{namespace=\"aiops-dev\", job=~\"$service\"}[1m]))",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Error rate (% of requests returning 5xx)",
+      "description": "The seeded bug shows here FIRST. Note it rises on order (origin) AND on gateway and frontend, which merely propagate the failure — distinguishing origin from collateral is the core diagnostic skill.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum by (job) (rate(http_requests_total{namespace=\"aiops-dev\", job=~\"$service\", status=~\"5..\"}[1m])) / clamp_min(sum by (job) (rate(http_requests_total{namespace=\"aiops-dev\", job=~\"$service\"}[1m])), 0.001)",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "dashed" } }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Latency p95 / p99",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket{namespace=\"aiops-dev\", job=~\"$service\"}[5m])))",
+          "legendFormat": "p95 {{job}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, job) (rate(http_request_duration_seconds_bucket{namespace=\"aiops-dev\", job=~\"$service\"}[5m])))",
+          "legendFormat": "p99 {{job}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 } }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "SIGNAL 3 — LOGS  (Loki, shipped by Fluent Bit)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Error log volume",
+      "description": "Counts error-level lines. Correlating a spike here with the error-rate panel above, then reading the lines below, is the whole diagnostic loop.",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 15 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kubernetes_container_name) (count_over_time({kubernetes_namespace_name=\"aiops-dev\", level=\"error\"}[1m]))",
+          "legendFormat": "{{kubernetes_container_name}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 } }
+    },
+    {
+      "id": 7,
+      "type": "logs",
+      "title": "Error logs — the evidence",
+      "description": "Label names are FLATTENED by the Fluent Bit Loki output: kubernetes_namespace_name, not namespace. request_id is a FIELD not a label (unbounded cardinality), so it is filtered at query time with | json.",
+      "gridPos": { "h": 6, "w": 16, "x": 8, "y": 15 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{kubernetes_namespace_name=\"aiops-dev\", level=\"error\"} | json"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true
+      }
+    }
+  ]
+}

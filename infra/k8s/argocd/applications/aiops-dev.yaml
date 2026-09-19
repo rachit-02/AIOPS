@@ -1,0 +1,57 @@
+# The Application that actually deploys the 7 services + Postgres.
+#
+# ArgoCD watches the `path` below on `main` and makes the cluster match it.
+# When CI bumps the image tags in that kustomization, this Application goes
+# OutOfSync and then syncs itself - which is the entire deploy mechanism. No
+# `kubectl apply` is ever run by a human or by CI.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aiops-dev
+  namespace: argocd
+  # Without this finalizer, deleting the Application orphans everything it
+  # created, leaving resources in the cluster that no longer exist in Git.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/rachit-02/AIOPS.git
+    targetRevision: main
+    # THE FILE CI WRITES TO. This path is the entire contract between the
+    # pipeline and the cluster.
+    path: infra/k8s/overlays/dev
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: aiops-dev
+
+  syncPolicy:
+    automated:
+      # Delete cluster resources that have been removed from Git. Without
+      # prune, Git stops being the source of truth the moment anything is
+      # deleted: the manifest is gone but the object lives on.
+      prune: true
+      # Revert manual `kubectl edit`s back to what Git says. This is what makes
+      # "GitOps is the single source of truth" enforceable rather than a
+      # convention people are asked to respect.
+      selfHeal: true
+    syncOptions:
+      # The namespace is defined in the base manifests, so ArgoCD does not need
+      # to create it - but this avoids a chicken-and-egg failure on first sync
+      # if the namespace object is processed after something inside it.
+      - CreateNamespace=true
+      # Prune last: remove old objects only after the new ones are healthy, so
+      # a rollout never briefly has neither version running.
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+
+  # Keep 10 revisions of sync history, so a rollback target is always available
+  # from the UI as well as from `git revert`.
+  revisionHistoryLimit: 10

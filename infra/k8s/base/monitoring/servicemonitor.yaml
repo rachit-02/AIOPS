@@ -1,0 +1,56 @@
+# ServiceMonitors: how kube-prometheus-stack discovers the 7 services.
+#
+# This is the Kubernetes-native replacement for the static `scrape_configs`
+# list in observability/prometheus/prometheus.yml. The important property is
+# that scraping is now driven by LABELS rather than by a hand-maintained list
+# of hostnames -- a new service with the right labels is scraped automatically,
+# and a deleted one stops being scraped, with no Prometheus config change.
+#
+# TWO THINGS THAT MAKE THIS WORK, both of which fail SILENTLY if wrong:
+#
+# 1. Prometheus must be willing to look at these at all. The Helm values set
+#    serviceMonitorSelectorNilUsesHelmValues=false; left at its default `true`,
+#    Prometheus only considers ServiceMonitors carrying the chart's own release
+#    label, and these would be ignored with no error and no metrics.
+#
+# 2. `job` must keep matching the service name. Dashboards and Kira's PromQL
+#    both group by `job`, and they were written against the compose stack where
+#    job == service name. By default the Prometheus Operator sets job to the
+#    Service name, which here IS the service name -- so the same PromQL works
+#    unchanged in both environments. That is deliberate, not luck.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aiops-services
+  labels:
+    app.kubernetes.io/part-of: aiops
+spec:
+  # Selects every Service labelled as part of this project -- all 7 at once,
+  # rather than 7 near-identical ServiceMonitor objects.
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: aiops
+  namespaceSelector:
+    matchNames:
+      - aiops-dev
+  endpoints:
+    - port: http # named port on the Service, not a number
+      path: /metrics
+      # 15s here vs 5s in compose: the laptop is running a full cluster, and
+      # 15s is a realistic production interval. Rate windows in the dashboards
+      # use [1m], which needs >= 4 samples to be stable at this interval.
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        # Expose the pod name as a label so a spike can be traced to one
+        # replica. Bounded cardinality: pods are few and short-lived sets.
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+---
+# Postgres has no /metrics endpoint (no exporter sidecar, deliberately -- one
+# more component for little gain here). Its health is visible through
+# kube-state-metrics pod status and through each service's /ready probe, which
+# checks the database. That is the honest answer if asked "how do you know the
+# database is healthy?": readiness of everything that depends on it.

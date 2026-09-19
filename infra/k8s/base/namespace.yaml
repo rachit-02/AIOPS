@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-dev
+  labels:
+    app.kubernetes.io/part-of: aiops
+    # Lets the Fluent Bit / Loki queries and the Grafana dashboard target the
+    # application namespace specifically, rather than scraping everything.
+    aiops.io/environment: dev

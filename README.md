@@ -17,7 +17,7 @@ applies every fix. That boundary is deliberate and is defended in
 | 1 | Monorepo + local dev (7 services, Postgres, Prometheus, Grafana) | **Done** |
 | 2 | CI — GitHub Actions, parallel builds, push to GHCR, tag write-back | **Done** |
 | 3 | Terraform — kind cluster + ArgoCD, Prometheus/Grafana, Loki, Fluent Bit | **Done** |
-| 4 | GitOps — ArgoCD app-of-apps | Not started |
+| 4 | GitOps — ArgoCD app-of-apps, ServiceMonitors, dashboard as code | **Done** |
 | 5 | Kira — local agent + 3 scoped tools (Anthropic API) | Not started |
 | 6 | React UI + incident demo | Not started |
 
@@ -306,6 +306,101 @@ read time instead —
 `{kubernetes_namespace_name="aiops-dev"} | json | request_id="abc-123"` —
 which is the same cardinality discipline applied to the Prometheus metric
 labels, for the same reason.
+
+---
+
+## GitOps — verified end to end
+
+A push to `services/**` reaches running pods with no human touching the
+cluster. This was measured, not assumed:
+
+| Step | Evidence |
+|---|---|
+| Source commit `59b4b3a` pushed to `main` | — |
+| CI builds 7 images, pushes to GHCR | 17/17 jobs green |
+| Bot commits the tag bump | `chore(deploy): 59b4b3a [skip ci]` by `github-actions[bot]`, touching only `kustomization.yaml` |
+| ArgoCD notices and syncs | Application `aiops-dev` → `Synced / Healthy` at revision `20c3acd` |
+| Pods roll out | all 7 Deployments on `:59b4b3a`, pods 60s old, Postgres untouched |
+| App still works | 12/12 functional checks through `localhost:8090` |
+
+No `kubectl apply` was run at any point. A deploy is a `git push`; a rollback
+is `git revert`.
+
+### What ArgoCD manages
+
+```
+Terraform ──plants──▶ Application/root ──watches──▶ infra/k8s/argocd/applications/
+                                                          │
+                                                          ▼
+                                                  Application/aiops-dev
+                                                          │ watches
+                                                          ▼
+                                              infra/k8s/overlays/dev  ◀── CI writes here
+```
+
+Terraform plants **exactly one object** — the root Application. Everything
+else is added, changed or removed by committing to Git. That is the smallest
+the bootstrap exception can be made: ArgoCD cannot install itself, and cannot
+manage applications before it is running, so something outside GitOps has to
+start the chain.
+
+`prune: true` and `selfHeal: true` are what make "Git is the source of truth"
+enforceable rather than a convention: a resource deleted from Git is deleted
+from the cluster, and a manual `kubectl edit` is reverted within minutes.
+
+### The three signals, in one dashboard
+
+Grafana → **AIOps — Three Signals** (`aiops-three-signals`), provisioned from
+[a ConfigMap in Git](infra/k8s/base/monitoring/dashboard-three-signals.json),
+so a dashboard change is a reviewable commit.
+
+| Row | Source | What it proves |
+|---|---|---|
+| **Pod health** | Kubernetes API via kube-state-metrics | replicas ready, container restarts |
+| **Metrics** | Prometheus scraping `/metrics` via ServiceMonitor | request rate, error %, p95/p99 |
+| **Logs** | Loki, shipped by Fluent Bit | error volume + the log lines themselves |
+
+They are **genuinely independent data sources** — a different system, a
+different collection path, a different storage engine for each. That is what
+makes cross-referencing them meaningful rather than circular, and it is the
+whole basis of Kira's diagnosis in Phase 5.
+
+The seeded bug is the clearest demonstration: **pod health stays green**
+throughout, metrics show a 5xx spike on `order` *and* on `gateway`/`frontend`
+that merely propagate it, and only the logs name the line. Any one signal
+alone misleads.
+
+### Secrets
+
+Committed to Git as plain `Secret` manifests, deliberately. They are the same
+throwaway credentials already in `docker-compose.yml` and `db/init/`, guarding
+a disposable cluster bound to localhost. Committing them keeps every cluster
+object traceable to the repository, with no out-of-band `kubectl create secret`
+that would make the cluster un-reproducible.
+
+**This is not what production looks like.** The real options — External Secrets
+Operator, Sealed Secrets, or SOPS+age — each add a component that buys nothing
+for credentials already public in this repo. The choice is scoped and
+deliberate, and [the manifest says so](infra/k8s/base/secrets.yaml).
+
+### Three settings that fail silently if wrong
+
+Each of these produces a green-looking system that does not work, and each cost
+real debugging time here:
+
+1. **`runAsUser` must be numeric.** The Dockerfiles said `USER node`; Kubernetes
+   cannot resolve a *name* to a uid, so with `runAsNonRoot: true` it refuses to
+   start the container — `CreateContainerConfigError`. Now fixed at source
+   (`USER 1000:1000`) with the manifest setting kept as defence in depth.
+2. **A NodePort must actually exist.** `kind-config.yaml` maps host `8090` to
+   node port `30080`, but every Service was ClusterIP. ArgoCD reported
+   `Synced / Healthy` and all 8 pods `Running` while the frontend was
+   unreachable.
+3. **CI and ArgoCD must render manifests identically.** The base generates its
+   DB-init ConfigMap from the one canonical `db/init/01-schemas.sql`, outside
+   the kustomize root, so both need `--load-restrictor LoadRestrictionsNone`.
+   CI's verify gate caught the mismatch and refused to commit a tag bump — the
+   gate doing exactly its job.
 
 ---
 

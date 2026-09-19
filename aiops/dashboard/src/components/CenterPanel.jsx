@@ -106,6 +106,24 @@ export default function CenterPanel({ svc, system, detail, history, pipelineStag
         >
           {STATUS_LABEL[svc.status]}
         </span>
+        {/* Shown whenever the seeded fault is armed, even at a zero error
+            rate - otherwise a "healthy" tag sits next to a "Resolve incident"
+            button and the two appear to contradict each other. */}
+        {svc.faultArmed && (
+          <span
+            className="mono font-semibold"
+            title="The seeded fault is enabled on this service. It only produces errors when a request hits the failing path."
+            style={{
+              fontSize: 11,
+              padding: '3px 8px',
+              borderRadius: 20,
+              border: '1px solid var(--signal-warn)',
+              color: 'var(--signal-warn)',
+            }}
+          >
+            fault armed
+          </span>
+        )}
         {svc.image && (
           <span className="mono" style={{ fontSize: 11, color: 'var(--text-faint)' }}>
             {/* The tag IS the short git SHA that built it. */}

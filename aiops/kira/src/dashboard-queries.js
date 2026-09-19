@@ -57,9 +57,18 @@ export async function latencySeries(timeRange = '15m', quantile = 0.99) {
 export async function errorRateSeries(timeRange = '15m') {
   const seconds = parseTimeRange(timeRange);
   const w = Math.max(60, Math.min(seconds, 300));
-  const expr =
-    `100 * sum by (job) (rate(http_requests_total{namespace="${config.namespace}",status=~"5.."}[${w}s]))` +
-    ` / clamp_min(sum by (job) (rate(http_requests_total{namespace="${config.namespace}"}[${w}s])), 0.001)`;
+  const total = `sum by (job) (rate(http_requests_total{namespace="${config.namespace}"}[${w}s]))`;
+  const errors = `sum by (job) (rate(http_requests_total{namespace="${config.namespace}",status=~"5.."}[${w}s]))`;
+
+  // `or (<total> * 0)` fills a ZERO for every job that has no 5xx series.
+  //
+  // Without it, PromQL division only emits a result where BOTH sides have a
+  // matching job label - so a service that has just started erroring produces
+  // no points at all until the 5xx series spans the window, and its error
+  // chart stays blank at exactly the moment it matters most. Measured: order
+  // sitting at 4.51% with an empty error series while frontend and gateway,
+  // which had errored earlier, had 41 points each.
+  const expr = `100 * ((${errors}) or (${total} * 0)) / clamp_min(${total}, 0.001)`;
   const series = await rangeQuery(expr, seconds);
   const out = {};
   for (const s of series) {

@@ -20,6 +20,11 @@ import { liveIncidentState, incidentHistory, setIncident } from './incident.js';
 
 const PORT = Number(process.env.KIRA_API_PORT) || 7777;
 
+// The seeded fault lives in the order service specifically (see the SEEDED BUG
+// banner in services/order/src/index.js). Named here so the UI can show WHICH
+// service is armed rather than implying the whole system is.
+const SEEDED_FAULT_SERVICE = 'order';
+
 // Display metadata only. Every STATUS below is derived from live telemetry;
 // nothing here is a hardcoded health value.
 const SERVICE_META = {
@@ -134,6 +139,9 @@ app.get(
           node: p.node,
         })),
         failingRoutes: m?.failing_routes ?? [],
+        // Armed != failing. The fault can be armed while the error rate is
+        // zero simply because nothing is exercising the failing path.
+        faultArmed: id === SEEDED_FAULT_SERVICE && incidentActive === true,
         // The running image tag is the short git SHA that produced it, which
         // is how a diagnosis ties back to a specific commit.
         image: health.deployments.find((d) => d.name === id)?.image ?? null,
@@ -141,16 +149,38 @@ app.get(
     });
 
     const critical = services.filter((s) => s.status === 'crit');
+    const elevated = services.filter((s) => s.status === 'warn');
+
+    // TWO DIFFERENT QUESTIONS, and the UI must not blur them:
+    //   "is the seeded fault ARMED?"    -> incidentActive, the env var on the pod
+    //   "are errors FLOWING right now?" -> derived from the error rate
+    //
+    // They legitimately disagree whenever the fault is armed but nothing is
+    // exercising the failing path - no traffic means no 5xx means a healthy
+    // error rate. Reporting that as a flat "All systems normal" next to a
+    // "Resolve incident" button reads as a contradiction, so the armed-but-
+    // quiet case gets its own wording and its own colour.
+    const overall = (() => {
+      if (critical.length) {
+        return {
+          status: 'crit',
+          text: `${critical.length} active incident${critical.length > 1 ? 's' : ''} — ${critical.map((s) => s.name).join(', ')}`,
+        };
+      }
+      if (elevated.length) {
+        return { status: 'warn', text: `Elevated errors — ${elevated.map((s) => s.name).join(', ')}` };
+      }
+      if (incidentActive) {
+        return { status: 'warn', text: `Fault armed on Order — no errors in the last ${range}` };
+      }
+      return { status: 'ok', text: 'All systems normal' };
+    })();
+
     res.json({
       at: new Date().toISOString(),
       range,
       namespace: config.namespace,
-      overall: {
-        status: critical.length ? 'crit' : services.some((s) => s.status === 'warn') ? 'warn' : 'ok',
-        text: critical.length
-          ? `${critical.length} active incident${critical.length > 1 ? 's' : ''} — ${critical.map((s) => s.name).join(', ')}`
-          : 'All systems normal',
-      },
+      overall,
       incident: { active: incidentActive },
       totalRestarts: health.summary.total_restarts,
       podsReady: health.summary.ready_pods,

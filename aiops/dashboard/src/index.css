@@ -1,0 +1,257 @@
+@import 'tailwindcss';
+
+/* ===========================================================================
+   FLIGHT RECORDER — design tokens
+   Taken verbatim from the design preview. Defined as CSS custom properties,
+   never as one-off values in components, so a theme switch is a single
+   attribute flip on <html> and every surface follows.
+   =========================================================================== */
+:root {
+  --bg-primary: #10141c; /* deep slate ink, deliberately not pure black */
+  --bg-panel: #171b24;
+  --bg-panel-raised: #1d2330;
+  --border: rgba(231, 229, 222, 0.09); /* hairline */
+  --border-strong: rgba(231, 229, 222, 0.16);
+  --text: #e7e5de; /* warm off-white, not #FFF */
+  --text-dim: #8a8f9c;
+  --text-faint: #5b6270;
+  --signal-ok: #5ec8d8;
+  --signal-warn: #ffb454;
+  --signal-crit: #e5533d; /* muted red-orange, never neon */
+
+  --font-head: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+  --radius: 3px; /* barely-rounded: instrument panel, not SaaS card */
+}
+
+/* Light theme. The signal colours are DARKENED rather than reused: the dark
+   mode cyan/amber/red sit around 2:1 against a near-white panel, which fails
+   contrast badly. These are the same hues at usable luminance. */
+:root[data-theme='light'] {
+  --bg-primary: #f2f1ec;
+  --bg-panel: #ffffff;
+  --bg-panel-raised: #f8f7f3;
+  --border: rgba(16, 20, 28, 0.1);
+  --border-strong: rgba(16, 20, 28, 0.2);
+  --text: #171b24;
+  --text-dim: #5b6270;
+  --text-faint: #8a8f9c;
+  --signal-ok: #0e8fa3;
+  --signal-warn: #b9700a;
+  --signal-crit: #b23a28;
+}
+
+* {
+  box-sizing: border-box;
+}
+html {
+  height: 100%;
+  scroll-padding-top: env(safe-area-inset-top, 0px);
+}
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text);
+  font-family: var(--font-head);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+#root {
+  min-height: 100%;
+}
+::selection {
+  background: var(--signal-warn);
+  color: #10141c;
+}
+button {
+  font-family: inherit;
+}
+a {
+  color: var(--signal-ok);
+}
+
+/* Focus is always visible and always the same shape. On a dense panel a
+   subtle focus ring is the same as no focus ring. */
+:where(button, a, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--signal-ok);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ===========================================================================
+   Component primitives.
+   These live in CSS rather than as repeated utility strings because they are
+   the vocabulary of the instrument panel and are used dozens of times; a
+   28-class string copied into every tile is how a design drifts.
+   =========================================================================== */
+
+.btn {
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel-raised);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--signal-ok);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-danger {
+  color: var(--signal-warn);
+}
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--signal-warn);
+}
+.btn-icon {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.panel-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+/* Small tracked caps for section labels. This is instrument-panel labelling
+   (11-12px, one word or two), not the "eyebrow text above a heading" pattern
+   the brief rules out. It matches the reference preview. */
+.panel-box h3 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--signal-ok);
+  transition:
+    border-color 0.3s ease,
+    color 0.3s ease;
+}
+.status-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.status-pill.crit {
+  color: var(--signal-crit);
+  border-color: var(--signal-crit);
+}
+.status-pill.warn {
+  color: var(--signal-warn);
+  border-color: var(--signal-warn);
+}
+/* The single pulsing element in the UI, and only while something is actually
+   wrong. Motion here means "this is live and unresolved". */
+.status-pill.crit .dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.cursor {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  background: var(--signal-ok);
+  margin-left: 2px;
+  vertical-align: -1px;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+.toast-in {
+  animation: toast-in 0.2s ease-out;
+}
+.toast-out {
+  animation: toast-out 0.25s ease-in forwards;
+}
+
+/* Everything that moves, stops. Nothing here conveys information by motion
+   alone - the pulsing dot is also red, the cursor is also a caret - so
+   removing motion loses no meaning. */
+@media (prefers-reduced-motion: reduce) {
+  .status-pill.crit .dot,
+  .cursor,
+  .toast-in,
+  .toast-out {
+    animation: none;
+  }
+  * {
+    transition: none !important;
+  }
+}

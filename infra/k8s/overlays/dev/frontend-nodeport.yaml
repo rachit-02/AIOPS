@@ -1,0 +1,24 @@
+# Expose the frontend on a fixed NodePort so it is reachable from the host.
+#
+# WHY THIS IS AN OVERLAY PATCH AND NOT IN base/
+# base/ describes the application in an environment-agnostic way; how it is
+# reached from outside is a property of the ENVIRONMENT. A real cluster would
+# front this with an Ingress and a DNS name; this local one uses a NodePort
+# mapped to a host port. Keeping that distinction is what makes base/ reusable.
+#
+# The number is load-bearing: infra/terraform/kind-config.yaml maps host port
+# 8090 -> container port 30080 on the control-plane node. Change one and the
+# other must change too, or the frontend silently becomes unreachable while
+# every pod still reports Healthy -- which is exactly how this was missed the
+# first time.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      nodePort: 30080

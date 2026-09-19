@@ -30,6 +30,12 @@ namespace: aiops-dev
 resources:
 - ../../base
 
+# Environment-specific overrides. `kustomize edit set image` (run by CI)
+# rewrites only the `images:` block, so patches listed here survive the bot's
+# commits untouched.
+patches:
+- path: frontend-nodeport.yaml
+
 # `kustomize edit set image <name>=<newName>:<newTag>` (run by CI) rewrites the
 # two fields below. `name` matches the placeholder in the base deployment;
 # `newName` points at the GHCR package; `newTag` is the short commit SHA.

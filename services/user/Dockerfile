@@ -24,7 +24,15 @@ COPY user/package.json ./
 COPY user/src ./src
 # Unprivileged user shipped in the base image: a compromised service cannot
 # write to the image filesystem or bind privileged ports.
-USER node
+#
+# NUMERIC, not `USER node`. Kubernetes refuses to start a container with
+# runAsNonRoot: true when the image's user is a NAME, because it cannot
+# resolve it to a uid and therefore cannot prove the user is not root:
+#   "container has runAsNonRoot and image has non-numeric user (node)"
+# 1000:1000 is the `node` user in node:22-alpine (`id -u node`). Declaring it
+# numerically makes the image satisfy that check on its own, rather than
+# relying on every Deployment to set runAsUser.
+USER 1000:1000
 EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3   CMD node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "src/index.js"]

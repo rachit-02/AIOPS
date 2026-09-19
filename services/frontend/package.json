@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node src/index.js" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"PLACEHOLDER: no unit tests yet for frontend (see README > Testing)\" && exit 0"
+  },
   "dependencies": {
     "http-proxy-middleware": "^3.0.3"
   }

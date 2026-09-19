@@ -1,0 +1,293 @@
+# =============================================================================
+# CI: build -> push to ECR -> hand off to GitOps
+#
+# The pipeline stops at the edge of the cluster. It never runs `kubectl apply`.
+# Its final act is a Git commit; ArgoCD does the deploying. See the `gitops`
+# job at the bottom - that boundary is the whole point of the architecture.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # LOOP PREVENTION, layer 1 of 3.
+    # The `gitops` job below commits to infra/k8s/. Without this filter that
+    # commit would re-trigger this workflow, which would rebuild, commit
+    # again, and run forever. Listing only the paths that should cause a
+    # rebuild means the bot's own commits are structurally incapable of
+    # triggering it. (Layers 2 and 3 are documented on that job.)
+    paths:
+      - 'services/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    # On PRs we lint and test but never build or push: an unreviewed branch
+    # must not be able to put an image in ECR or write to main.
+    paths:
+      - 'services/**'
+      - '.github/workflows/ci.yml'
+
+# Least privilege by default. Jobs that need more elevate it themselves, so
+# the extra permission is visible at the point it is used.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Deliberately NOT cancel-in-progress. Two runs racing to write image tags
+  # could interleave and commit a half-updated manifest set. Queuing is slower
+  # but always leaves Git in a coherent state.
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPO_PREFIX: aiops-dev          # repos are aiops-dev-<service>
+  MANIFEST_PATH: infra/k8s/overlays/dev
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Derive the service list from the filesystem instead of hardcoding it in
+  # three matrices. Adding services/notifications/ automatically gets it built
+  # - the pipeline can't silently drift from the repo.
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.discover.outputs.services }}
+      packages: ${{ steps.discover.outputs.packages }}
+      sha_short: ${{ steps.discover.outputs.sha_short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: discover
+        run: |
+          set -euo pipefail
+          # Deployable services = every dir under services/ with a Dockerfile.
+          # That rule automatically excludes _shared (a library, not a service).
+          services=$(find services -mindepth 2 -maxdepth 2 -name Dockerfile \
+            | cut -d/ -f2 | sort | jq -R . | jq -sc .)
+          # Lint/test targets additionally include _shared, which has the only
+          # real unit tests in the repo.
+          packages=$(find services -mindepth 1 -maxdepth 1 -type d \
+            | cut -d/ -f2 | sort | jq -R . | jq -sc .)
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          # Short SHA is the image tag. Computed once here so every job tags
+          # identically - recomputing per job risks a mismatch.
+          echo "sha_short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Services: $services"
+          echo "Tag: $(git rev-parse --short=7 HEAD)"
+
+  # ---------------------------------------------------------------------------
+  # Gate: nothing is built until lint and tests pass for every package.
+  # ---------------------------------------------------------------------------
+  check:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # report every failing service in one run, not just the first
+      matrix:
+        package: ${{ fromJSON(needs.prepare.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: services/${{ matrix.package }}/package-lock.json
+
+      # ESLint lives once at services/ root, not per service, so all 7 are held
+      # to the same rules.
+      - name: Install lint tooling
+        run: npm ci --prefix services
+
+      - name: Lint
+        run: npx --prefix services eslint services/${{ matrix.package }}
+
+      - name: Install package deps
+        run: npm ci --prefix services/${{ matrix.package }}
+
+      # Real tests in _shared; explicit placeholders elsewhere (they print a
+      # PLACEHOLDER banner so a green check is never mistaken for coverage).
+      - name: Test
+        run: npm test --prefix services/${{ matrix.package }}
+
+  # ---------------------------------------------------------------------------
+  # Build all 7 images in parallel and push to ECR.
+  # ---------------------------------------------------------------------------
+  build:
+    # Only on push to main. PRs get check/ but never touch ECR.
+    if: github.event_name == 'push'
+    needs: [prepare, check]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write     # REQUIRED for OIDC: lets the job mint a token AWS will trust
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.prepare.outputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # No long-lived AWS keys anywhere. GitHub signs a short-lived OIDC token
+      # asserting "this is repo X, branch main"; AWS's trust policy checks that
+      # assertion and hands back credentials valid for ~1 hour. Nothing to leak
+      # from repo secrets, nothing to rotate.
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-${{ github.run_id }}   # traceable in CloudTrail
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Context is services/ (not services/<svc>/) because every service
+          # imports ../../_shared and the build needs both in scope.
+          context: services
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          # EXACTLY ONE TAG: the short commit SHA. No `latest`.
+          #   - `latest` is mutable, so "which code is running?" stops having a
+          #     single answer and rollback has no fixed target.
+          #   - The ECR repos are created with IMMUTABLE tags, so re-pushing
+          #     `latest` would fail the build on every run after the first.
+          #   - One tag per image keeps the lifecycle policy's "keep last 10"
+          #     rule meaningful.
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}-${{ matrix.service }}:${{ needs.prepare.outputs.sha_short }}
+          provenance: false   # ECR + kustomize don't need the attestation manifest; it complicates image listing
+          # Layer cache in GitHub's cache backend: npm ci is the slow step and
+          # it only re-runs when a lockfile changes.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+
+  # ---------------------------------------------------------------------------
+  # THE GITOPS HANDOFF - the crux of the architecture.
+  #
+  # CI has produced immutable, content-addressed images in ECR. It now records
+  # WHICH images should be running by writing their tags into Git, and stops.
+  # It does not talk to the cluster. It has no cluster credentials. It could
+  # not deploy if it wanted to.
+  #
+  # ArgoCD, running inside EKS, watches this path on main and pulls. So:
+  #   - Git is the single source of truth for desired state.
+  #   - The deploy is a `git push`, and a rollback is a `git revert`.
+  #   - "What is running in production?" is answered by reading a file, not by
+  #     interrogating the cluster.
+  #   - CI credentials can't reach the cluster, so a compromised pipeline can
+  #     push a bad image but cannot bypass review to deploy one.
+  #
+  # Runs ONCE (not in a matrix): seven parallel jobs committing to the same
+  # file would collide on every push.
+  # ---------------------------------------------------------------------------
+  gitops:
+    if: github.event_name == 'push'
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # the one job allowed to write to the repo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need real history to rebase onto concurrent pushes below.
+          fetch-depth: 0
+          # Checkout must keep the token in .git/config so the later `git push`
+          # authenticates. This is the default; stated explicitly because the
+          # push silently fails without it.
+          persist-credentials: true
+
+      - name: Install kustomize
+        run: |
+          set -euo pipefail
+          # Pinned: an unpinned installer would let a kustomize release change
+          # how manifests render without any commit in this repo.
+          curl -sSfLo kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz
+          tar -xzf kustomize.tar.gz && sudo mv kustomize /usr/local/bin/
+          kustomize version
+
+      - name: Point manifests at the images this run built
+        env:
+          SERVICES: ${{ needs.prepare.outputs.services }}
+          TAG: ${{ needs.prepare.outputs.sha_short }}
+          # This job deliberately has NO AWS credentials - it only writes text
+          # to Git. So the registry hostname is reconstructed from the account
+          # id rather than read from `aws sts`. Keeping this job credential-free
+          # is the point: the thing that writes the deploy manifest cannot talk
+          # to AWS or to the cluster.
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          cd "$MANIFEST_PATH"
+          # `kustomize edit set image` rewrites newName/newTag structurally.
+          # Chosen over sed/yq because it validates the file as it edits: a
+          # malformed kustomization fails here rather than at ArgoCD sync time.
+          for svc in $(echo "$SERVICES" | jq -r '.[]'); do
+            kustomize edit set image \
+              "aiops/${svc}=${REGISTRY}/${ECR_REPO_PREFIX}-${svc}:${TAG}"
+          done
+          echo "--- updated kustomization.yaml ---"
+          cat kustomization.yaml
+
+      - name: Verify manifests still render
+        run: |
+          set -euo pipefail
+          # Safety gate: never commit a manifest set that doesn't build.
+          # Without this, a broken kustomization reaches main and ArgoCD goes
+          # degraded - a self-inflicted outage delivered by the deploy system.
+          kustomize build "$MANIFEST_PATH" > /tmp/rendered.yaml
+          grep -c 'image:' /tmp/rendered.yaml
+          echo "Manifests render cleanly."
+
+      - name: Commit and push the tag bump
+        run: |
+          set -euo pipefail
+          # Identity of the GitHub Actions bot. Using the bot (rather than
+          # impersonating a human) makes machine commits obvious in `git log`.
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add "$MANIFEST_PATH/kustomization.yaml"
+
+          # Idempotence: a rebuild of an unchanged commit produces identical
+          # tags. Committing nothing would create an empty commit on every run.
+          if git diff --cached --quiet; then
+            echo "Image tags unchanged - nothing to commit."
+            exit 0
+          fi
+
+          # LOOP PREVENTION, layer 2: [skip ci] in the subject.
+          # Belt-and-braces behind the paths: filter. If someone later widens
+          # that filter, this still stops the loop.
+          #
+          # LOOP PREVENTION, layer 3 (free, and the strongest): pushes made
+          # with the default GITHUB_TOKEN do not trigger workflow runs at all.
+          # GitHub enforces this to prevent exactly this class of recursion.
+          git commit -m "chore(deploy): ${{ needs.prepare.outputs.sha_short }} [skip ci]" \
+                     -m "Set image tags to ${{ needs.prepare.outputs.sha_short }} for ArgoCD to sync.
+
+          Source commit: ${{ github.sha }}
+          Built by: ${{ github.workflow }} run ${{ github.run_id }}"
+
+          # Concurrent merges to main can land between checkout and push.
+          # Rebase-and-retry rather than force-push: this job's change is a
+          # tiny edit to one file and always replays cleanly, whereas a force
+          # push would silently discard someone else's merge.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) - rebasing onto latest main."
+            git pull --rebase origin main
+          done
+          echo "Could not push after 3 attempts." >&2
+          exit 1

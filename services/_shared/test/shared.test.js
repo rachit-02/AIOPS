@@ -59,12 +59,17 @@ test('/ready returns 200 when dependencies are healthy', async () => {
   server.close();
 });
 
-test('chaos endpoints inject errors and are off unless enabled', async () => {
+test('chaos endpoints are absent unless CHAOS_ENABLED', async () => {
   delete process.env.CHAOS_ENABLED;
-  let off = await boot();
+  const off = await boot();
   assert.equal((await fetch(`${off.base}/chaos`)).status, 404);
   off.server.close();
+});
 
+// Split from the test above so the env var is set before any `await`: mutating
+// process.env after an await is what ESLint's require-atomic-updates warns
+// about, and the rule is right that it would be a race if tests ran concurrently.
+test('chaos injects errors when enabled', async () => {
   process.env.CHAOS_ENABLED = 'true';
   const on = await boot({}, (app) => app.get('/x', (req, res) => res.json({ ok: 1 })));
   assert.equal((await fetch(`${on.base}/x`)).status, 200);

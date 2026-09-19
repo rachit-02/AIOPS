@@ -1,0 +1,67 @@
+# ============================================================================
+# THE GITOPS HANDOFF POINT
+#
+# This file is the contract between CI and CD. It is the ONLY file the CI bot
+# writes to, and the only place image tags exist.
+#
+#   CI  (push):  builds images -> pushes to ECR -> rewrites the `newTag` values
+#                below -> commits -> pushes to main.
+#   CD  (pull):  ArgoCD watches this path on main, sees the changed tag, and
+#                syncs the cluster to match.
+#
+# Nothing ever runs `kubectl apply`. The cluster's state is whatever this file
+# says it is, which is why "what is deployed?" is answered by `git log` rather
+# than by asking the cluster. A rollback is `git revert`.
+#
+# DO NOT hand-edit the newTag values: CI overwrites them on the next push.
+#
+# NOTE: `kustomize edit` regenerates the `images:` block and discards any
+# comments *inside* it. Keep explanatory comments above the block, as here.
+#
+# The PLACEHOLDER values below are replaced on the first successful CI run.
+# ArgoCD is not pointed at this path until Phase 4, by which time CI will have
+# written real values.
+# ============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: aiops-dev
+
+resources:
+  - ../../base
+
+# `kustomize edit set image <name>=<newName>:<newTag>` (run by CI) rewrites the
+# two fields below. `name` matches the placeholder in the base deployment;
+# `newName` points at the ECR repo; `newTag` is the short commit SHA.
+#
+# WHY the commit SHA and not `latest`:
+#   - `latest` is mutable, so two pods on the same "version" can run different
+#     code, and a rollback has nothing to roll back to.
+#   - A SHA tag makes the running image traceable to the exact commit that
+#     produced it - which is what Kira needs when correlating "the error rate
+#     rose at 14:02" with "deploy of a1b2c3d at 14:01".
+#   - It also makes the Deployment spec genuinely change on each release, so
+#     Kubernetes performs a rollout. With `latest`, the spec is identical and
+#     nothing happens.
+images:
+  - name: aiops/frontend
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-frontend
+    newTag: bootstrap
+  - name: aiops/gateway
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-gateway
+    newTag: bootstrap
+  - name: aiops/auth
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-auth
+    newTag: bootstrap
+  - name: aiops/product
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-product
+    newTag: bootstrap
+  - name: aiops/order
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-order
+    newTag: bootstrap
+  - name: aiops/orders
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-orders
+    newTag: bootstrap
+  - name: aiops/user
+    newName: PLACEHOLDER_ECR_REGISTRY/aiops-dev-user
+    newTag: bootstrap

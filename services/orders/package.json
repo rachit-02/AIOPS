@@ -3,5 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node src/index.js" }
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"PLACEHOLDER: no unit tests yet for orders (see README > Testing)\" && exit 0"
+  }
 }

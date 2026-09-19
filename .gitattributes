@@ -1,0 +1,16 @@
+# Force LF in the repo for everything that a Linux container or CI runner
+# executes. Without this, Git on Windows checks these out as CRLF and they
+# break on Linux: `bash smoke.sh` fails with "\r: command not found", and a
+# Dockerfile shebang with a trailing \r makes the container exit 127.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+Dockerfile text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.js      text eol=lf
+*.json    text eol=lf
+*.sql     text eol=lf
+
+# Lockfiles are generated; collapse them in diffs and PR reviews.
+package-lock.json linguist-generated=true -diff

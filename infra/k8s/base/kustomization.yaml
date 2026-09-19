@@ -1,0 +1,44 @@
+# Base: environment-agnostic definition of the 7 services.
+# Contains NO image tags and NO environment-specific values - those live in
+# overlays/, which is what CI writes to.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - frontend/deployment.yaml
+  - frontend/service.yaml
+  - gateway/deployment.yaml
+  - gateway/service.yaml
+  - auth/deployment.yaml
+  - auth/service.yaml
+  - product/deployment.yaml
+  - product/service.yaml
+  - order/deployment.yaml
+  - order/service.yaml
+  - orders/deployment.yaml
+  - orders/service.yaml
+  - user/deployment.yaml
+  - user/service.yaml
+
+# Service discovery. These are cluster-internal DNS names, not secrets, so they
+# belong in Git. Identical to the docker-compose values except for the domain,
+# which is why the same code runs unchanged in both places.
+configMapGenerator:
+  - name: aiops-service-urls
+    literals:
+      - AUTH_SERVICE_URL=http://auth:3000
+      - PRODUCT_SERVICE_URL=http://product:3000
+      - ORDER_SERVICE_URL=http://order:3000
+      - ORDERS_SERVICE_URL=http://orders:3000
+      - USER_SERVICE_URL=http://user:3000
+      - GATEWAY_URL=http://gateway:3000
+      # Fault injection stays OFF in cluster environments. The Phase 6 incident
+      # demo uses the seeded bug, which is toggled per-deployment, not this.
+      - CHAOS_ENABLED=false
+
+# Without this, editing a ConfigMap leaves pods running the old values until
+# something unrelated restarts them. The name suffix changes when content
+# changes, which forces a rollout - a genuine config change becomes a genuine
+# deploy. ArgoCD then shows it as a real diff.
+generatorOptions:
+  disableNameSuffixHash: false

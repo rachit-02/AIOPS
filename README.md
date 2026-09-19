@@ -15,7 +15,7 @@ applies every fix. That boundary is deliberate and is defended in
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | Monorepo + local dev (7 services, Postgres, Prometheus, Grafana) | **Done** |
-| 2 | CI — GitHub Actions, parallel builds, push to ECR, tag write-back | Not started |
+| 2 | CI — GitHub Actions, parallel builds, push to GHCR, tag write-back | **Done** |
 | 3 | Terraform — VPC, EKS, ECR, ArgoCD + kube-prometheus-stack | Not started |
 | 4 | GitOps — ArgoCD app-of-apps | Not started |
 | 5 | Kira — Bedrock Agent + 3 scoped Lambda tools | Not started |
@@ -101,11 +101,99 @@ docker compose down -v            # stop AND wipe the DB (re-runs db/init on nex
 > uses **8087** (8080 is commonly taken by Java/Jenkins/Tomcat) and Postgres
 > **5433** (5432 is commonly taken by a local Postgres install).
 
-### Unit tests
+### Testing
 
-```bash
-cd services/_shared && npm ci && npm test    # 7 tests on the shared observability layer
+| Layer | What it covers | Run it |
+|-------|----------------|--------|
+| Unit | The shared observability layer — 8 tests, including one asserting metrics use route *templates* not raw URLs | `cd services/_shared && npm ci && npm test` |
+| Lint | All 7 services under one ESLint config | `cd services && npm ci && npx eslint .` |
+| End-to-end | Full user journey + authorization boundaries + Prometheus targets, against the running stack | `bash scripts/smoke.sh` |
+
+> **Per-service unit tests are deliberate placeholders.** Each service's
+> `npm test` prints a `PLACEHOLDER` banner and exits 0, so a green CI check is
+> never mistaken for real coverage. The genuine coverage today is `_shared`
+> (where the logic that *all* services depend on lives) plus `smoke.sh` (which
+> tests the services through their real HTTP contracts). Adding per-service
+> unit tests needs a test database or repository mocking — worth doing, not yet
+> done, and honest to say so.
+
+---
+
+## CI/CD — how a push becomes a deployment
+
 ```
+ push to main (services/** only)
+        │
+        ▼
+   ┌──────────┐   discovers the service list from the filesystem,
+   │ prepare  │   so the matrix can never drift from the repo
+   └────┬─────┘
+        ▼
+   ┌──────────┐   lint + test, 8 packages in parallel.
+   │  check   │   Nothing is built until this passes.
+   └────┬─────┘
+        ▼
+   ┌──────────┐   7 images in parallel → GHCR, tagged with the short SHA.
+   │  build   │   Auth via the built-in GITHUB_TOKEN — zero secrets.
+   └────┬─────┘
+        ▼
+   ┌──────────┐   rewrites image tags in infra/k8s/overlays/dev,
+   │  gitops  │   commits as github-actions[bot], pushes to main.
+   └────┬─────┘   *** CI STOPS HERE. It has no cluster credentials. ***
+        ▼
+   ArgoCD (in kind) notices the changed tag and syncs — Phase 4
+```
+
+**Why the pipeline stops at a Git commit.** CI's last act is to write down
+*which* images should be running. It never runs `kubectl apply` and holds no
+cluster credentials — it could not deploy if it tried. ArgoCD, running inside
+the cluster, pulls the change. The consequences are the point:
+
+- **Git is the single source of truth.** "What is deployed?" is answered by
+  reading a file, not by interrogating the cluster.
+- **A deploy is a `git push`; a rollback is a `git revert`.** Both are reviewed,
+  attributable and auditable.
+- **Blast radius is contained.** A compromised CI token can push a bad image,
+  but it cannot bypass review to deploy one.
+- **Drift is detectable.** Anything changed by hand in the cluster differs from
+  Git, and ArgoCD reports it.
+
+### Loop prevention — three independent layers
+
+The `gitops` job commits to the same repository that triggers the workflow.
+Left unguarded, that commit retriggers the build, which commits again, forever.
+Three layers stop it, any one of which would suffice:
+
+1. **`paths:` filter** — the workflow only triggers on `services/**`. The bot
+   writes to `infra/k8s/**`, so its commits are *structurally incapable* of
+   triggering a build.
+2. **`[skip ci]` in the commit subject** — backstop if someone later widens
+   that filter.
+3. **GitHub's own rule** — pushes authenticated with the default `GITHUB_TOKEN`
+   never trigger workflow runs. This is free and the strongest of the three.
+
+### Image tags are the short commit SHA, never `latest`
+
+`latest` is mutable, so two pods on the "same version" can run different code
+and a rollback has no fixed target. A SHA tag ties a running container to the
+exact commit that produced it — which is what Kira needs in Phase 5 to
+correlate "error rate rose at 14:02" with "deploy of `a1b2c3d` at 14:01".
+GHCR packages are immutable per tag for the same reason.
+
+### Setup — there isn't any
+
+The pipeline requires **no repository secrets and no external accounts**.
+`GITHUB_TOKEN` is minted per run, scoped to this repository, and expires when
+the job ends; `packages: write` is the only extra permission. The GHCR packages
+are public, so the kind cluster pulls them anonymously — no pull secrets
+either.
+
+This is a genuine simplification over the original ECR design, which needed an
+OIDC identity provider, a federated IAM role, a trust policy and two secrets
+configured before the first run. That design is preserved as a
+[design note](docs/design-notes/original-aws-design.md), because the IAM
+scoping and OIDC trust-policy reasoning are worth defending even though they
+are no longer deployed.
 
 ---
 
@@ -183,10 +271,21 @@ services/
 db/init/          schemas, roles, grants, seed data (runs on first Postgres start)
 observability/    Prometheus scrape config; Grafana datasource + dashboards as code
 scripts/smoke.sh  end-to-end verification
-infra/            Terraform            (Phase 3)
-aiops/            Kira agent + Lambdas (Phase 5)
-.github/workflows/ CI                  (Phase 2)
+infra/k8s/
+  base/           environment-agnostic Deployments + Services for all 7
+  overlays/dev/   image tags — THE FILE CI WRITES TO, and ArgoCD reads
+infra/terraform/  kind cluster + Helm platform  (Phase 3)
+aiops/            Kira agent + Lambdas   (Phase 5)
+docs/aws-setup.md manual AWS/GitHub setup for CI
+.github/workflows/ci.yml  build → GHCR → GitOps handoff
 ```
+
+## Contributing
+
+`main` is protected by convention: work happens on feature branches named
+`feat/<service>-<thing>` (e.g. `feat/order-idempotency-keys`) and merges via
+PR. Pull requests run lint and tests but **never** build or push images — only
+a merge to `main` publishes images.
 
 ---
 
@@ -258,8 +357,8 @@ machine" honest.
 but `node:22-alpine` still carries a full Node runtime. Switching to a
 distroless base (`gcr.io/distroless/nodejs22`) or a Node single-executable
 build would roughly halve this. Deliberately **not** done: the added build
-complexity isn't worth it at this scale, and ECR storage for a project this
-size is negligible. Worth mentioning as the next optimisation if asked.
+complexity isn't worth it at this scale, and registry storage for a project
+this size is negligible. Worth mentioning as the next optimisation if asked.
 
 ---
 

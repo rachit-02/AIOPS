@@ -1,0 +1,14 @@
+{
+  "name": "aiops-services-tooling",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only tooling shared across services. Deliberately NOT an npm workspace root: each service installs its own deps so its Docker image stays minimal and independent.",
+  "scripts": {
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0"
+  }
+}

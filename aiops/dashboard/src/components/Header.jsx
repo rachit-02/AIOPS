@@ -64,17 +64,25 @@ export default function Header({ system, theme, onToggleTheme, onOpenPalette, in
           <span>{stale ? 'Backend unreachable' : (overall?.text ?? 'Loading…')}</span>
         </div>
 
+        {/* Labelled for the FAULT, not the incident.
+            The pill reports what the telemetry currently shows; this button
+            reports whether the seeded fault is armed. Calling both of them
+            "incident" made them look contradictory in two opposite states:
+            armed but quiet (pill green, button "Resolve"), and disarmed but
+            with errors still inside the rolling window (pill red, button
+            "Trigger"). Naming the button after what it actually controls
+            removes the whole class of confusion. */}
         <button
           className="btn btn-danger"
           onClick={() => onToggleIncident(!incidentActive)}
           disabled={incidentBusy || !system}
-          title="Commits the change to Git and lets ArgoCD roll it out — takes 30-90s"
+          title={
+            incidentActive
+              ? 'Disarm the seeded fault in the Order service. Commits to Git; ArgoCD rolls it out (30-90s).'
+              : 'Arm the seeded fault in the Order service. Commits to Git; ArgoCD rolls it out (30-90s).'
+          }
         >
-          {incidentBusy
-            ? 'Working…'
-            : incidentActive
-              ? 'Resolve incident'
-              : 'Trigger incident — Order service'}
+          {incidentBusy ? 'Working…' : incidentActive ? 'Disarm seeded fault' : 'Arm seeded fault — Order'}
         </button>
 
         <button className="btn mono" onClick={onOpenPalette} title="Command palette (Ctrl/Cmd+K)">

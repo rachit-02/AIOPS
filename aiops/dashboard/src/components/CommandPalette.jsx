@@ -20,8 +20,8 @@ export default function CommandPalette({ open, onClose, services, incidentActive
     const base = [
       {
         id: 'incident',
-        label: incidentActive ? 'Resolve the incident' : 'Trigger incident — Order service',
-        hint: incidentBusy ? 'in progress' : 'incident',
+        label: incidentActive ? 'Disarm the seeded fault' : 'Arm the seeded fault — Order service',
+        hint: incidentBusy ? 'in progress' : 'fault',
         disabled: incidentBusy,
         run: () => actions.toggleIncident(!incidentActive),
       },

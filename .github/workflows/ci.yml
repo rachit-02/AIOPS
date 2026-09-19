@@ -252,8 +252,18 @@ jobs:
           # Safety gate: never commit a manifest set that doesn't build.
           # Without this, a broken kustomization reaches main and ArgoCD goes
           # degraded - a self-inflicted outage delivered by the deploy system.
-          kustomize build "$MANIFEST_PATH" > /tmp/rendered.yaml
-          grep -c 'image:' /tmp/rendered.yaml
+          #
+          # --load-restrictor MUST MATCH what ArgoCD uses (set via
+          # kustomize.buildOptions in infra/terraform/values/argocd.yaml). The
+          # base generates the DB-init ConfigMap from the single canonical
+          # db/init/01-schemas.sql, which sits outside the kustomize root.
+          # If these two ever disagree, this gate either fails on manifests
+          # ArgoCD would happily render, or - far worse - passes manifests
+          # ArgoCD cannot. Keep them in lockstep.
+          kustomize build --load-restrictor LoadRestrictionsNone \
+            "$MANIFEST_PATH" > /tmp/rendered.yaml
+          echo "Rendered $(grep -c '^kind: ' /tmp/rendered.yaml) objects, \
+          $(grep -c 'image: ' /tmp/rendered.yaml) images."
           echo "Manifests render cleanly."
 
       - name: Commit and push the tag bump

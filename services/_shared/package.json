@@ -1,0 +1,17 @@
+{
+  "name": "@aiops/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Observability + service scaffolding shared by all 7 services",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "pino": "^9.5.0",
+    "prom-client": "^15.1.3"
+  }
+}

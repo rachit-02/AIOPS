@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AIOps Shop (placeholder)</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    button { margin: 0 .5rem .5rem 0; padding: .4rem .8rem; }
+    pre { background: #f4f4f4; padding: 1rem; overflow: auto; max-height: 24rem; }
+  </style>
+</head>
+<body>
+  <h1>AIOps Shop</h1>
+  <p>Placeholder UI for Phase 1. It exercises the full path: frontend → gateway → services → Postgres.</p>
+  <button onclick="run(listProducts)">List products</button>
+  <button onclick="run(registerAndLogin)">Register + login</button>
+  <button onclick="run(placeOrder)">Place order</button>
+  <button onclick="run(placeOrderNoAddress)">Place order (no address)</button>
+  <button onclick="run(listOrders)">My orders</button>
+  <pre id="out">Ready.</pre>
+  <script>
+    let token = null;
+    const out = document.getElementById('out');
+    async function api(path, opts = {}) {
+      const res = await fetch('/api' + path, {
+        ...opts,
+        headers: { 'content-type': 'application/json', ...(token && { authorization: 'Bearer ' + token }) },
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    }
+    async function run(fn) { out.textContent = JSON.stringify(await fn(), null, 2); }
+    const listProducts = () => api('/products');
+    async function registerAndLogin() {
+      const email = `demo${Date.now()}@example.com`;
+      await api('/auth/register', { method: 'POST', body: JSON.stringify({ email, name: 'Demo', password: 'password123' }) });
+      const r = await api('/auth/login', { method: 'POST', body: JSON.stringify({ email, password: 'password123' }) });
+      token = r.body?.token;
+      return { loggedInAs: email, status: r.status };
+    }
+    const placeOrder = () => api('/orders', { method: 'POST', body: JSON.stringify({
+      items: [{ productId: 1, qty: 1 }],
+      shippingAddress: { line1: '1 Demo Street', city: 'Bengaluru', postcode: '560001' },
+    }) });
+    // Omits the address on purpose: 400 normally, 500 when the seeded bug is enabled.
+    const placeOrderNoAddress = () => api('/orders', { method: 'POST', body: JSON.stringify({ items: [{ productId: 1, qty: 1 }] }) });
+    const listOrders = () => api('/orders');
+  </script>
+</body>
+</html>

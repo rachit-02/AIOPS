@@ -1,0 +1,176 @@
+# Local dev stack: 7 services + Postgres + Prometheus + Grafana.
+# Mirrors production topology (same images, same env-var wiring) so "works on
+# my machine" and "works on EKS" differ only in where the env vars come from.
+#
+# Host ports (container port is always 3000):
+#   frontend 8087 | gateway 8081 | auth 8082 | product 8083
+#   order 8084 | orders 8085 | user 8086   (direct ports exist for chaos/debug)
+#   prometheus 9090 | grafana 3030 | postgres 5433
+
+x-healthcheck: &healthcheck
+  # Hits the service's own /health (liveness only - never touches dependencies,
+  # so a DB blip doesn't get every container restarted). `depends_on:
+  # condition: service_healthy` below relies on this.
+  test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  interval: 5s
+  timeout: 3s
+  retries: 10
+  start_period: 10s
+
+x-service: &service
+  restart: unless-stopped
+  networks: [aiops-net]
+  healthcheck: *healthcheck
+  environment: &service-env
+    CHAOS_ENABLED: "true"                 # fault injection: LOCAL/DEMO ONLY
+    JWT_SECRET: ${JWT_SECRET:-local-dev-secret-change-me}
+    USER_SERVICE_URL: http://user:3000
+    PRODUCT_SERVICE_URL: http://product:3000
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    networks: [aiops-net]
+    environment:
+      POSTGRES_DB: aiops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_dev_pw}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Init scripts run only when the data dir is empty. To re-run after a
+      # schema change:  docker compose down -v
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports: ["5433:5432"]   # host 5433: 5432 is commonly taken by a local Postgres install
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aiops"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---- leaf services (need only Postgres) -----------------------------------
+  user:
+    <<: *service
+    build: { context: ./services, dockerfile: user/Dockerfile }
+    image: aiops/user:local
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://aiops_user:user_dev_pw@postgres:5432/aiops
+    ports: ["8086:3000"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  product:
+    <<: *service
+    build: { context: ./services, dockerfile: product/Dockerfile }
+    image: aiops/product:local
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://aiops_product:product_dev_pw@postgres:5432/aiops
+    ports: ["8083:3000"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  orders:
+    <<: *service
+    build: { context: ./services, dockerfile: orders/Dockerfile }
+    image: aiops/orders:local
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://aiops_orders:orders_dev_pw@postgres:5432/aiops
+    ports: ["8085:3000"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  # ---- services that call other services -------------------------------------
+  auth:
+    <<: *service
+    build: { context: ./services, dockerfile: auth/Dockerfile }
+    image: aiops/auth:local
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://aiops_auth:auth_dev_pw@postgres:5432/aiops
+    ports: ["8082:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      user: { condition: service_healthy }        # registration calls User
+
+  order:
+    <<: *service
+    build: { context: ./services, dockerfile: order/Dockerfile }
+    image: aiops/order:local
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://aiops_order:order_dev_pw@postgres:5432/aiops
+      # SEEDED BUG toggle (see comment in services/order/src/index.js).
+      # Enable:  SEED_BUG_NULL_SHIPPING=true docker compose up -d order
+      SEED_BUG_NULL_SHIPPING: ${SEED_BUG_NULL_SHIPPING:-false}
+    ports: ["8084:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      product: { condition: service_healthy }     # order creation calls Product
+
+  # ---- edge --------------------------------------------------------------------
+  gateway:
+    <<: *service
+    build: { context: ./services, dockerfile: gateway/Dockerfile }
+    image: aiops/gateway:local
+    environment:
+      <<: *service-env
+      AUTH_SERVICE_URL: http://auth:3000
+      ORDER_SERVICE_URL: http://order:3000
+      ORDERS_SERVICE_URL: http://orders:3000
+    ports: ["8081:3000"]
+    depends_on:
+      auth: { condition: service_healthy }
+      product: { condition: service_healthy }
+      order: { condition: service_healthy }
+      orders: { condition: service_healthy }
+      user: { condition: service_healthy }
+
+  frontend:
+    <<: *service
+    build: { context: ./services, dockerfile: frontend/Dockerfile }
+    image: aiops/frontend:local
+    environment:
+      <<: *service-env
+      GATEWAY_URL: http://gateway:3000
+    ports: ["8087:3000"]   # 8080 is commonly taken (Java/Jenkins/Tomcat)
+    depends_on: { gateway: { condition: service_healthy } }
+
+  # ---- observability -------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    networks: [aiops-net]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    networks: [aiops-net]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"      # demo convenience: view dashboards without login
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      # Dashboards and datasource are provisioned from files: reproducible,
+      # reviewable in Git, no manual clicking (same GitOps spirit as the rest).
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3030:3000"]
+    depends_on: { prometheus: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  aiops-net:
+    name: aiops-net       # one shared network: services reach each other by name (DNS)
+
+volumes:
+  pgdata:

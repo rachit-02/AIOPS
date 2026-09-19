@@ -1,0 +1,22 @@
+# One job per service so the `job` label == service name. Dashboards group by
+# `job`; the k8s ServiceMonitors in Phase 3 will produce the same label, so the
+# same PromQL works locally and on EKS.
+global:
+  scrape_interval: 5s      # short for a lively demo; 15-30s is typical in production
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: frontend
+    static_configs: [{ targets: ["frontend:3000"] }]
+  - job_name: gateway
+    static_configs: [{ targets: ["gateway:3000"] }]
+  - job_name: auth
+    static_configs: [{ targets: ["auth:3000"] }]
+  - job_name: product
+    static_configs: [{ targets: ["product:3000"] }]
+  - job_name: order
+    static_configs: [{ targets: ["order:3000"] }]
+  - job_name: orders
+    static_configs: [{ targets: ["orders:3000"] }]
+  - job_name: user
+    static_configs: [{ targets: ["user:3000"] }]

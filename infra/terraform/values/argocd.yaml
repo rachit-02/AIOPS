@@ -11,6 +11,59 @@ configs:
     # protects traffic that leaves the machine; this never does.
     server.insecure: true
 
+  cm:
+    # REQUIRED for the base kustomization to build.
+    # infra/k8s/base generates the DB-init ConfigMap from the one canonical
+    # db/init/01-schemas.sql, which lives outside the kustomize root. Kustomize
+    # refuses that by default. Relaxing it keeps a single source of truth for
+    # the schema across compose and the cluster; the alternative was a
+    # duplicated SQL file that could silently drift.
+    kustomize.buildOptions: --load-restrictor LoadRestrictionsNone
+
+# =============================================================================
+# THE BOOTSTRAP SEED (app-of-apps root)
+#
+# Terraform installs ArgoCD and plants exactly ONE Application: this root. It
+# points at a directory in Git containing the real Applications, so from here
+# on everything is added, changed or removed by committing to that directory --
+# Terraform is never touched again to deploy anything.
+#
+# This resolves the obvious bootstrap question: ArgoCD cannot install itself,
+# and cannot manage applications before it is running. Something outside GitOps
+# has to start the chain. Keeping that "something" down to a single object
+# means the exception is as small as it can be, and it is declarative and
+# version-controlled rather than a remembered kubectl command.
+#
+# Declared via extraObjects so it is rendered by the same Helm release that
+# installs the Application CRD -- Helm applies CRDs before templates, so the
+# ordering works on a clean install.
+# =============================================================================
+extraObjects:
+  - apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: root
+      namespace: argocd
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/rachit-02/AIOPS.git
+        targetRevision: main
+        path: infra/k8s/argocd/applications
+        directory:
+          recurse: false # flat directory of Application manifests
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: argocd
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false
+
 server:
   service:
     type: NodePort

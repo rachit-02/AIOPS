@@ -1,0 +1,84 @@
+# Postgres for the cluster environment.
+#
+# A StatefulSet rather than a Helm chart: the whole definition is ~60 lines of
+# readable YAML in Git, with nothing hidden behind chart values. For a single
+# local instance that is a better trade than a dependency.
+#
+# It reads the SAME db/init/01-schemas.sql that docker-compose uses (mounted
+# here via a ConfigMap generated from that one file), so the schema, roles and
+# grants cannot drift between the two environments.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: aiops
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: aiops
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: aiops
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: aiops-postgres
+                  key: POSTGRES_PASSWORD
+            # The image initialises into $PGDATA. A subdirectory is used because
+            # a mounted volume root can contain lost+found, which makes initdb
+            # refuse to start on a "non-empty" directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          # pg_isready checks the server actually answers, not just that the
+          # process exists. -U/-d matter: the default probes the wrong database.
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "aiops"] }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "postgres", "-d", "aiops"] }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 384Mi }
+      volumes:
+        - name: init
+          configMap:
+            name: aiops-db-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # kind ships local-path-provisioner as the default StorageClass, so no
+        # storageClassName is pinned - the manifest stays portable.
+        resources:
+          requests:
+            storage: 2Gi

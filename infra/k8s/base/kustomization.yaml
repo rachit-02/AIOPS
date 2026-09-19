@@ -1,10 +1,14 @@
-# Base: environment-agnostic definition of the 7 services.
-# Contains NO image tags and NO environment-specific values - those live in
-# overlays/, which is what CI writes to.
+# Base: environment-agnostic definition of the whole application.
+# Contains NO image tags - those live in overlays/, which is what CI writes to.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
+  - namespace.yaml
+  - secrets.yaml
+  - postgres/statefulset.yaml
+  - postgres/service.yaml
+  - monitoring/servicemonitor.yaml
   - frontend/deployment.yaml
   - frontend/service.yaml
   - gateway/deployment.yaml
@@ -20,9 +24,9 @@ resources:
   - user/deployment.yaml
   - user/service.yaml
 
-# Service discovery. These are cluster-internal DNS names, not secrets, so they
-# belong in Git. Identical to the docker-compose values except for the domain,
-# which is why the same code runs unchanged in both places.
+# Service discovery. Cluster-internal DNS names, not secrets, so they belong in
+# Git. Identical to the docker-compose values except for the domain, which is
+# why the same service code runs unchanged in both places.
 configMapGenerator:
   - name: aiops-service-urls
     literals:
@@ -32,13 +36,39 @@ configMapGenerator:
       - ORDERS_SERVICE_URL=http://orders:3000
       - USER_SERVICE_URL=http://user:3000
       - GATEWAY_URL=http://gateway:3000
-      # Fault injection stays OFF in cluster environments. The Phase 6 incident
-      # demo uses the seeded bug, which is toggled per-deployment, not this.
+      # Fault injection stays OFF in the cluster. The Phase 6 incident uses the
+      # seeded bug, toggled per-deployment through Git.
       - CHAOS_ENABLED=false
 
-# Without this, editing a ConfigMap leaves pods running the old values until
-# something unrelated restarts them. The name suffix changes when content
-# changes, which forces a rollout - a genuine config change becomes a genuine
-# deploy. ArgoCD then shows it as a real diff.
+  # The database schema, roles and grants, generated from THE SAME FILE that
+  # docker-compose mounts. One canonical copy means the compose and cluster
+  # environments cannot drift apart - a duplicated schema that silently
+  # diverged would be a genuinely nasty class of bug.
+  #
+  # Reaching outside the kustomize root requires --load-restrictor
+  # LoadRestrictionsNone, which is set for ArgoCD in the Terraform values and
+  # must be passed to any local `kustomize build`. That relaxation is a
+  # deliberate, documented trade for keeping one source of truth.
+  - name: aiops-db-init
+    files:
+      - 01-schemas.sql=../../../db/init/01-schemas.sql
+
+  # Picked up by the kube-prometheus-stack Grafana sidecar (which watches ALL
+  # namespaces for this label) and turned into a dashboard. The dashboard
+  # therefore arrives through GitOps like everything else - no clicking, no
+  # manual import, and a dashboard change is a reviewable commit.
+  - name: aiops-dashboard-three-signals
+    options:
+      labels:
+        grafana_dashboard: "1"
+      # The sidecar looks the ConfigMap up by a stable name; a rotating hash
+      # suffix would orphan the previous dashboard on every change.
+      disableNameSuffixHash: true
+    files:
+      - three-signals.json=monitoring/dashboard-three-signals.json
+
+# Changing a ConfigMap's contents changes its name, which forces a rollout of
+# everything mounting it. Without this, pods keep the old values until something
+# unrelated restarts them - a genuine config change would appear to do nothing.
 generatorOptions:
   disableNameSuffixHash: false

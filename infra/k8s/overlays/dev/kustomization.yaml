@@ -28,7 +28,7 @@ kind: Kustomization
 namespace: aiops-dev
 
 resources:
-  - ../../base
+- ../../base
 
 # `kustomize edit set image <name>=<newName>:<newTag>` (run by CI) rewrites the
 # two fields below. `name` matches the placeholder in the base deployment;
@@ -44,24 +44,24 @@ resources:
 #     Kubernetes performs a rollout. With `latest`, the spec is identical and
 #     nothing happens.
 images:
-  - name: aiops/frontend
-    newName: ghcr.io/rachit-02/aiops-frontend
-    newTag: bootstrap
-  - name: aiops/gateway
-    newName: ghcr.io/rachit-02/aiops-gateway
-    newTag: bootstrap
-  - name: aiops/auth
-    newName: ghcr.io/rachit-02/aiops-auth
-    newTag: bootstrap
-  - name: aiops/product
-    newName: ghcr.io/rachit-02/aiops-product
-    newTag: bootstrap
-  - name: aiops/order
-    newName: ghcr.io/rachit-02/aiops-order
-    newTag: bootstrap
-  - name: aiops/orders
-    newName: ghcr.io/rachit-02/aiops-orders
-    newTag: bootstrap
-  - name: aiops/user
-    newName: ghcr.io/rachit-02/aiops-user
-    newTag: bootstrap
+- name: aiops/auth
+  newName: ghcr.io/rachit-02/aiops-auth
+  newTag: 00e1bb2
+- name: aiops/frontend
+  newName: ghcr.io/rachit-02/aiops-frontend
+  newTag: 00e1bb2
+- name: aiops/gateway
+  newName: ghcr.io/rachit-02/aiops-gateway
+  newTag: 00e1bb2
+- name: aiops/order
+  newName: ghcr.io/rachit-02/aiops-order
+  newTag: 00e1bb2
+- name: aiops/orders
+  newName: ghcr.io/rachit-02/aiops-orders
+  newTag: 00e1bb2
+- name: aiops/product
+  newName: ghcr.io/rachit-02/aiops-product
+  newTag: 00e1bb2
+- name: aiops/user
+  newName: ghcr.io/rachit-02/aiops-user
+  newTag: 00e1bb2

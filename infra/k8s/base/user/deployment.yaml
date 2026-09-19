@@ -47,6 +47,16 @@ spec:
             limits: { cpu: 300m, memory: 256Mi }
           securityContext:
             runAsNonRoot: true
+            # MUST be numeric. The Dockerfile says `USER node`, and Kubernetes
+            # refuses to start a container when runAsNonRoot is set but the
+            # image's user is a NAME it cannot resolve to a uid:
+            #   "container has runAsNonRoot and image has non-numeric user
+            #    (node), cannot verify user is non-root"
+            # 1000 is the uid of `node` in node:22-alpine (verified with
+            # `id -u node`). Setting it here keeps the guarantee Kubernetes
+            # could not otherwise verify.
+            runAsUser: 1000
+            runAsGroup: 1000
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }

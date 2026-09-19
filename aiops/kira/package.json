@@ -1,0 +1,16 @@
+{
+  "name": "aiops-kira",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kira - AIOps diagnostic agent. Correlates metrics, logs and pod health to explain incidents. Diagnoses only; never remediates.",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node src/index.js --check",
+    "demo": "bash test/incident-demo.sh"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "@kubernetes/client-node": "^1.0.0"
+  }
+}

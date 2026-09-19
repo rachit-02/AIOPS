@@ -20,49 +20,23 @@ configs:
     # duplicated SQL file that could silently drift.
     kustomize.buildOptions: --load-restrictor LoadRestrictionsNone
 
-# =============================================================================
-# THE BOOTSTRAP SEED (app-of-apps root)
+# NOTE: the root Application is NOT declared here.
 #
-# Terraform installs ArgoCD and plants exactly ONE Application: this root. It
-# points at a directory in Git containing the real Applications, so from here
-# on everything is added, changed or removed by committing to that directory --
-# Terraform is never touched again to deploy anything.
+# It was, via `extraObjects`, and that worked only because ArgoCD happened to
+# already be installed when it was added. A clean `terraform apply` against a
+# fresh cluster fails:
 #
-# This resolves the obvious bootstrap question: ArgoCD cannot install itself,
-# and cannot manage applications before it is running. Something outside GitOps
-# has to start the chain. Keeping that "something" down to a single object
-# means the exception is as small as it can be, and it is declarative and
-# version-controlled rather than a remembered kubectl command.
+#   resource mapping not found for kind "Application" in version
+#   "argoproj.io/v1alpha1" -- ensure CRDs are installed first
 #
-# Declared via extraObjects so it is rendered by the same Helm release that
-# installs the Application CRD -- Helm applies CRDs before templates, so the
-# ordering works on a clean install.
-# =============================================================================
-extraObjects:
-  - apiVersion: argoproj.io/v1alpha1
-    kind: Application
-    metadata:
-      name: root
-      namespace: argocd
-      finalizers:
-        - resources-finalizer.argocd.argoproj.io
-    spec:
-      project: default
-      source:
-        repoURL: https://github.com/rachit-02/AIOPS.git
-        targetRevision: main
-        path: infra/k8s/argocd/applications
-        directory:
-          recurse: false # flat directory of Application manifests
-      destination:
-        server: https://kubernetes.default.svc
-        namespace: argocd
-      syncPolicy:
-        automated:
-          prune: true
-          selfHeal: true
-        syncOptions:
-          - CreateNamespace=false
+# The Helm provider renders and validates the ENTIRE manifest set against the
+# API server before applying anything, so a chart cannot reference a CRD it is
+# itself installing in the same release. Caught by a full destroy/recreate,
+# which is precisely why that test is worth running.
+#
+# The root Application now lives in infra/k8s/argocd/root-application.yaml and
+# is applied by Terraform as a separate step, after this release completes.
+# See main.tf.
 
 server:
   service:

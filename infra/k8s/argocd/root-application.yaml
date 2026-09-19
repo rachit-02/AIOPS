@@ -1,0 +1,45 @@
+# =============================================================================
+# THE BOOTSTRAP SEED — the one object Terraform plants by hand.
+#
+# ArgoCD cannot install itself, and cannot manage Applications before it is
+# running. Something outside GitOps has to start the chain. This is that
+# something, and it is deliberately the smallest it can be: a single
+# Application that points at a DIRECTORY in Git. Everything else — every
+# service, every dashboard, every future app — is added, changed or removed by
+# committing a file to that directory. Terraform is never touched again to
+# deploy anything.
+#
+# It lives in Git as a reviewable manifest rather than inline in Terraform or
+# in a remembered kubectl command, so the exception is visible and auditable.
+#
+# Applied by Terraform AFTER the ArgoCD Helm release, because the Application
+# CRD must exist before this kind can be created. See infra/terraform/main.tf.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    # Without this, deleting the root Application orphans every child
+    # Application it created.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rachit-02/AIOPS.git
+    targetRevision: main
+    # A flat directory of Application manifests. Dropping a new file here is
+    # how a new app gets deployed.
+    path: infra/k8s/argocd/applications
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true # an Application removed from Git is removed from the cluster
+      selfHeal: true # manual kubectl edits are reverted
+    syncOptions:
+      - CreateNamespace=false

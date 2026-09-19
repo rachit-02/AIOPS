@@ -34,7 +34,16 @@ nodes:
       - { containerPort: 30080, hostPort: 8090, protocol: TCP }   # frontend
       - { containerPort: 30030, hostPort: 3031, protocol: TCP }   # Grafana
       - { containerPort: 30081, hostPort: 8091, protocol: TCP }   # ArgoCD UI
-      - { containerPort: 30090, hostPort: 9091, protocol: TCP }   # Prometheus
+      # Kira's two query APIs. She runs OUTSIDE the cluster (a plain Node
+      # process on the host), so her data sources have to be reachable from the
+      # host. NodePorts rather than `kubectl port-forward`: a port-forward is a
+      # process someone has to remember to start and that dies silently, which
+      # would look to Kira exactly like the data source being down.
+      - { containerPort: 30090, hostPort: 9091, protocol: TCP }   # Prometheus -> fetch_metrics
+      - { containerPort: 30100, hostPort: 3100, protocol: TCP }   # Loki       -> fetch_logs
+      #
+      # fetch_health needs no mapping: it talks to the Kubernetes API server,
+      # which kind already exposes to the host via kubeconfig.
   - role: worker
   - role: worker
 

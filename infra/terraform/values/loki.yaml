@@ -91,3 +91,35 @@ monitoring:
   rules: { enabled: false }
   serviceMonitor: { enabled: false }
   selfMonitoring: { enabled: false }
+
+# ---- Host access for Kira -----------------------------------------------------
+# A SECOND Service, deliberately, rather than changing the chart's own `loki`
+# Service to NodePort:
+#   - `singleBinary.service` exposes `type` but NOT `nodePort` (verified with
+#     `helm show values`), so switching its type would allocate a RANDOM port
+#     that cannot be matched by a fixed kind extraPortMapping.
+#   - In-cluster clients (Grafana, Fluent Bit) keep using the untouched
+#     ClusterIP service, so host access cannot destabilise log ingestion.
+#
+# The selector is copied from the chart's own Service, so both target the same
+# pods. Port 30100 must stay in step with kind-config.yaml.
+extraObjects:
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: loki-nodeport
+      namespace: logging
+      labels:
+        app.kubernetes.io/name: loki
+        aiops.io/purpose: host-access-for-kira
+    spec:
+      type: NodePort
+      selector:
+        app.kubernetes.io/component: single-binary
+        app.kubernetes.io/instance: loki
+        app.kubernetes.io/name: loki
+      ports:
+        - name: http-metrics
+          port: 3100
+          targetPort: 3100
+          nodePort: 30100

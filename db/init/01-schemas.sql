@@ -45,17 +45,27 @@ CREATE TABLE user_svc.users (
 -- ---- product --------------------------------------------------------------
 CREATE TABLE product_svc.products (
   id          SERIAL PRIMARY KEY,
+  -- SKU doubles as the storefront's image slug: the frontend renders
+  -- /images/<sku>.jpg. Keeping one identifier rather than a separate
+  -- image-name column means a product cannot end up pointing at the wrong
+  -- photo through a mismatched mapping table.
   sku         TEXT UNIQUE NOT NULL,
   name        TEXT NOT NULL,
+  category    TEXT NOT NULL DEFAULT 'general',       -- drives the storefront nav tabs
   price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
   stock       INTEGER NOT NULL CHECK (stock >= 0)   -- DB-level guard against overselling
 );
-INSERT INTO product_svc.products (sku, name, price_cents, stock) VALUES
-  ('KB-001', 'Mechanical Keyboard', 8999, 50),
-  ('MS-002', 'Wireless Mouse',      2999, 100),
-  ('MN-003', '27" Monitor',        24999, 20),
-  ('HD-004', 'USB-C Hub',           3999, 75),
-  ('WC-005', 'HD Webcam',           5999, 40);
+-- The Arbor catalogue. Stock is deliberately finite so the oversell guard in
+-- POST /products/reserve is reachable in a demo rather than theoretical.
+INSERT INTO product_svc.products (sku, name, category, price_cents, stock) VALUES
+  ('tote',    'Canvas Field Tote',   'accessories', 3800, 40),
+  ('mug',     'Ceramic Mug, pair',   'home',        2400, 60),
+  ('scarf',   'Merino Wool Scarf',   'apparel',     5200, 30),
+  ('shirt',   'Washed Linen Shirt',  'apparel',     6400, 25),
+  ('belt',    'Saddle Leather Belt', 'accessories', 4600, 35),
+  ('beanie',  'Ribbed Knit Beanie',  'apparel',     2200, 50),
+  ('throw',   'Cotton Throw',        'home',        5800, 20),
+  ('bookend', 'Brass Bookends',      'home',        4100, 18);
 
 -- ---- order ----------------------------------------------------------------
 CREATE TABLE order_svc.orders (

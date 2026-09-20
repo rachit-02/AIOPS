@@ -1,49 +1,129 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>AIOps Shop (placeholder)</title>
-  <style>
-    body { font: 14px system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
-    button { margin: 0 .5rem .5rem 0; padding: .4rem .8rem; }
-    pre { background: #f4f4f4; padding: 1rem; overflow: auto; max-height: 24rem; }
-  </style>
-</head>
-<body>
-  <h1>AIOps Shop</h1>
-  <p>Placeholder UI for Phase 1. It exercises the full path: frontend → gateway → services → Postgres.</p>
-  <button onclick="run(listProducts)">List products</button>
-  <button onclick="run(registerAndLogin)">Register + login</button>
-  <button onclick="run(placeOrder)">Place order</button>
-  <button onclick="run(placeOrderNoAddress)">Place order (no address)</button>
-  <button onclick="run(listOrders)">My orders</button>
-  <pre id="out">Ready.</pre>
-  <script>
-    let token = null;
-    const out = document.getElementById('out');
-    async function api(path, opts = {}) {
-      const res = await fetch('/api' + path, {
-        ...opts,
-        headers: { 'content-type': 'application/json', ...(token && { authorization: 'Bearer ' + token }) },
-      });
-      return { status: res.status, body: await res.json().catch(() => null) };
-    }
-    async function run(fn) { out.textContent = JSON.stringify(await fn(), null, 2); }
-    const listProducts = () => api('/products');
-    async function registerAndLogin() {
-      const email = `demo${Date.now()}@example.com`;
-      await api('/auth/register', { method: 'POST', body: JSON.stringify({ email, name: 'Demo', password: 'password123' }) });
-      const r = await api('/auth/login', { method: 'POST', body: JSON.stringify({ email, password: 'password123' }) });
-      token = r.body?.token;
-      return { loggedInAs: email, status: r.status };
-    }
-    const placeOrder = () => api('/orders', { method: 'POST', body: JSON.stringify({
-      items: [{ productId: 1, qty: 1 }],
-      shippingAddress: { line1: '1 Demo Street', city: 'Bengaluru', postcode: '560001' },
-    }) });
-    // Omits the address on purpose: 400 normally, 500 when the seeded bug is enabled.
-    const placeOrderNoAddress = () => api('/orders', { method: 'POST', body: JSON.stringify({ items: [{ productId: 1, qty: 1 }] }) });
-    const listOrders = () => api('/orders');
-  </script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Arbor — Quality goods</title>
+    <meta
+      name="description"
+      content="Arbor storefront — the customer-facing service in a 7-service AIOps system."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="header-inner">
+        <div class="brand">Arbor</div>
+        <nav id="navTabs" aria-label="Product categories"></nav>
+        <div class="header-actions">
+          <!-- Points at the Phase 6 ops dashboard. This storefront is one of the
+               seven services that dashboard watches. -->
+          <a
+            class="system-link"
+            id="systemLink"
+            href="http://localhost:5173"
+            target="_blank"
+            rel="noopener"
+            title="Opens the AIOps operations dashboard that monitors this service"
+            >System status ↗</a
+          >
+          <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+          <button class="icon-btn" id="cartBtn" title="Cart" aria-label="Open cart">
+            🛍
+            <span class="cart-count" id="cartCount">0</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h1>Quietly made goods, built to be used.</h1>
+      <p>
+        A small collection of everyday things — textiles, tableware, and a few things for carrying
+        what matters. Every order here is a real request through the gateway to the order service.
+      </p>
+    </section>
+
+    <section class="shop">
+      <div class="product-grid" id="grid" aria-busy="true">
+        <p class="grid-status" id="gridStatus">Loading the catalogue from the product service…</p>
+      </div>
+    </section>
+
+    <footer>
+      <p>
+        Arbor is the customer-facing service in a 7-service system, deployed via GitOps and watched
+        by three observability signals. Submitting checkout without a shipping address reproduces
+        the same incident Kira investigates in the ops dashboard.
+      </p>
+    </footer>
+
+    <div class="scrim" id="scrim"></div>
+
+    <aside class="drawer" id="drawer" aria-label="Cart and checkout" aria-hidden="true">
+      <div class="drawer-head">
+        <h3 id="drawerTitle">Your cart</h3>
+        <button class="icon-btn" id="closeDrawer" aria-label="Close">✕</button>
+      </div>
+
+      <div class="drawer-body">
+        <div class="view active" id="viewCart">
+          <div id="cartList"></div>
+        </div>
+
+        <div class="view" id="viewCheckout">
+          <form id="checkoutForm" novalidate>
+            <label for="fName">Full name</label>
+            <input type="text" id="fName" placeholder="Jordan Rivera" autocomplete="name" />
+
+            <label for="fAddr1">Address line 1</label>
+            <input type="text" id="fAddr1" placeholder="221 Birchwood Ave" autocomplete="address-line1" />
+
+            <label for="fCity">City</label>
+            <input type="text" id="fCity" placeholder="Springfield" autocomplete="address-level2" />
+
+            <label for="fState">State / PIN</label>
+            <input type="text" id="fState" placeholder="MH 411001" autocomplete="postal-code" />
+
+            <div class="demo-toggle">
+              <input type="checkbox" id="fSeedBug" />
+              <label for="fSeedBug" class="demo-label">
+                Demo: submit without a shipping address. This sends a real order with no address —
+                the backend's actual response is shown, whatever it is.
+              </label>
+            </div>
+          </form>
+
+          <div class="error-box" id="errorBox" role="alert"></div>
+        </div>
+
+        <div class="view" id="viewConfirm">
+          <div class="confirm">
+            <div class="confirm-icon" aria-hidden="true">✓</div>
+            <h3>Order placed</h3>
+            <p class="order-no" id="orderNo"></p>
+            <div id="confirmDetail"></div>
+            <p class="confirm-note">
+              Read back from the Orders read-service, which holds SELECT-only access to the order
+              tables.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="drawer-foot" id="drawerFoot">
+        <div class="subtotal-row"><span>Subtotal</span><span id="subtotal">$0.00</span></div>
+        <button class="btn-primary" id="primaryAction">Checkout</button>
+        <button class="btn-ghost" id="secondaryAction" hidden>Back to cart</button>
+      </div>
+    </aside>
+
+    <script src="/app.js" type="module"></script>
+  </body>
 </html>

@@ -46,12 +46,6 @@ export async function liveIncidentState() {
   }
 }
 
-/** What Git says the desired state is. Divergence from live = a sync in flight. */
-async function manifestState() {
-  const text = await readFile(join(REPO_ROOT, MANIFEST), 'utf8');
-  return /name:\s*SEED_BUG_NULL_SHIPPING\s*\n\s*value:\s*"true"/.test(text);
-}
-
 /**
  * Flip the flag in the manifest. Returns false if it was already correct.
  *
@@ -77,6 +71,38 @@ async function setManifest(enabled) {
 }
 
 /**
+ * Push, rebasing onto whatever landed on main in the meantime.
+ *
+ * A plain push fails routinely here, and it is not a rare race: CI's gitops
+ * job commits an image-tag bump to main after every build, so the local clone
+ * goes stale within minutes of any push. The first real attempt at this hit
+ * exactly that - "Updates were rejected because a pushed branch tip is behind
+ * its remote counterpart".
+ *
+ * Rebase rather than merge, and never force: this commit is a one-line edit to
+ * one file and replays cleanly onto anything, whereas a force push would
+ * silently discard the bot's tag bump and strand the cluster on an image tag
+ * that no longer exists in Git.
+ */
+async function pushWithRebase(onStage) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await git(['push', '-q', 'origin', 'HEAD:main']);
+      return;
+    } catch (err) {
+      if (attempt === 3) throw err;
+      onStage('push', `Remote moved on; rebasing and retrying (${attempt}/2)`);
+      await git(['fetch', '-q', 'origin', 'main']);
+      await git(['rebase', '-q', 'origin/main']).catch(async (rebaseErr) => {
+        // Leave no half-finished rebase behind for the next run to trip over.
+        await git(['rebase', '--abort']).catch(() => {});
+        throw rebaseErr;
+      });
+    }
+  }
+}
+
+/**
  * Toggle the incident, reporting progress as it moves through the pipeline.
  * @param {boolean} enabled
  * @param {(stage: string, detail: string) => void} onStage
@@ -96,7 +122,7 @@ export async function setIncident(enabled, onStage = () => {}) {
         'reviewed commits here; ArgoCD delivers them from Git.',
     ]);
     onStage('push', 'Pushing to main');
-    await git(['push', '-q', 'origin', 'HEAD:main']);
+    await pushWithRebase(onStage);
   } else {
     onStage('push', 'Manifest already in the target state');
   }

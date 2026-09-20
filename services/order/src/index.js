@@ -1,6 +1,7 @@
 // Order service: the WRITE path (create / update status).
 // Reads (history, listing) are served by the separate Orders service.
 import { createService, createPool, callService, asyncHandler as ah } from '../../_shared/index.js';
+import { applyPromo, authorizePayment, fxRate, isSupportedCurrency, promoCodeNames } from './commerce.js';
 
 const PRODUCT_URL = process.env.PRODUCT_SERVICE_URL || 'http://product:3000';
 const pool = createPool();
@@ -17,6 +18,20 @@ const TRANSITIONS = {
 };
 
 const userIdOf = (req) => Number(req.headers['x-user-id']) || null;
+
+/**
+ * Compensating action for every path that aborts AFTER stock was reserved.
+ *
+ * There are now three such paths (unsupported currency, payment declined,
+ * database failure). Each one that forgot to call this would leak stock
+ * permanently - the items would be unavailable to everyone with no order to
+ * show for it - so it lives in one place rather than being repeated.
+ */
+async function releaseStock(items, requestId) {
+  await callService(PRODUCT_URL, '/products/release', {
+    method: 'POST', body: { items }, requestId,
+  }).catch((e) => log.error({ request_id: requestId, err: e.message }, 'stock_release_failed'));
+}
 
 // =============================================================================
 // !!! SEEDED BUG - DELIBERATE, DO NOT "FIX" !!!
@@ -80,15 +95,52 @@ app.post('/orders', ah(async (req, res) => {
     throw err; // Product down/timeout -> 500 via the shared error handler
   }
 
-  // 2. Persist. If this fails we must give the stock back (compensation),
+  // 2. Money, computed HERE from the prices Product returned. The client sends
+  //    a promo CODE and a currency, never an amount - anything the browser can
+  //    edit is a suggestion, not a rule.
+  const subtotalCents = reserved.items.reduce((sum, i) => sum + i.unitPriceCents * i.qty, 0);
+  const promo = applyPromo(req.body?.promoCode, subtotalCents);
+  const discountCents = promo?.discountCents ?? 0;
+  const totalCents = subtotalCents - discountCents;
+
+  const currency = String(req.body?.currency ?? 'USD').toUpperCase();
+  if (!isSupportedCurrency(currency)) {
+    await releaseStock(items, req.id);
+    return res.status(400).json({ error: `unsupported currency "${currency}"` });
+  }
+  const rate = fxRate(currency);
+  const chargedAmount = Number(((totalCents / 100) * rate).toFixed(2));
+
+  // 3. Payment. A DEMO gate, but a real server-side decision: the storefront
+  //    renders an actual 402 from this service rather than a scripted error.
+  //    Runs after reservation, so a decline must hand the stock back.
+  const payment = authorizePayment(req.body?.card);
+  if (!payment.ok) {
+    await releaseStock(items, req.id);
+    // 402 rather than 400: the request was well-formed, the payment was refused.
+    return res.status(402).json({
+      error: 'payment_declined',
+      decline_code: payment.code,
+      message: payment.message,
+      card_last4: payment.last4,
+      request_id: req.id,
+    });
+  }
+
+  // 4. Persist. If this fails we must give the stock back (compensation),
   //    otherwise stock leaks away on every failed order.
-  const total = reserved.items.reduce((sum, i) => sum + i.unitPriceCents * i.qty, 0);
   const conn = await pool.connect();
   try {
     await conn.query('BEGIN');
     const { rows } = await conn.query(
-      'INSERT INTO orders (user_id, total_cents, shipping_address) VALUES ($1, $2, $3) RETURNING id, status, total_cents, shipping_address, created_at',
-      [userId, total, shipTo],
+      `INSERT INTO orders
+         (user_id, subtotal_cents, discount_cents, total_cents, promo_code,
+          currency, fx_rate, charged_amount, shipping_address)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING id, status, subtotal_cents, discount_cents, total_cents, promo_code,
+                 currency, fx_rate, charged_amount, shipping_address, created_at`,
+      [userId, subtotalCents, discountCents, totalCents, promo?.code ?? null,
+       currency, rate, chargedAmount, shipTo],
     );
     for (const i of reserved.items) {
       await conn.query(
@@ -97,17 +149,20 @@ app.post('/orders', ah(async (req, res) => {
       );
     }
     await conn.query('COMMIT');
-    res.status(201).json({ ...rows[0], items: reserved.items });
+    res.status(201).json({ ...rows[0], items: reserved.items, promo_label: promo?.label ?? null });
   } catch (err) {
     await conn.query('ROLLBACK').catch(() => {});
-    await callService(PRODUCT_URL, '/products/release', {
-      method: 'POST', body: { items }, requestId: req.id,
-    }).catch((e) => log.error({ request_id: req.id, err: e.message }, 'stock_release_failed'));
+    await releaseStock(items, req.id);
     throw err;
   } finally {
     conn.release();
   }
 }));
+
+// Deliberately NOT /orders/promo-codes: that would collide with the gateway's
+// GET /api/orders/:id rule and get routed to the READ service, which knows
+// nothing about promo codes. Its own path keeps the two unambiguous.
+app.get('/promo-codes', (req, res) => res.json({ codes: promoCodeNames }));
 
 app.patch('/orders/:id/status', ah(async (req, res) => {
   const userId = userIdOf(req);

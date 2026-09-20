@@ -5,7 +5,7 @@ const pool = createPool();
 const { app, start } = createService({ name: 'product', pool });
 
 app.get('/products', ah(async (req, res) => {
-  const { rows } = await pool.query('SELECT id, sku, name, category, price_cents, stock FROM products ORDER BY id');
+  const { rows } = await pool.query('SELECT id, sku, name, category, description, rating, review_count, price_cents, stock FROM products ORDER BY id');
   res.json(rows);
 }));
 
@@ -70,7 +70,7 @@ app.post('/products/release', ah(async (req, res) => {
 }));
 
 app.get('/products/:id', ah(async (req, res) => {
-  const { rows } = await pool.query('SELECT id, sku, name, category, price_cents, stock FROM products WHERE id = $1', [
+  const { rows } = await pool.query('SELECT id, sku, name, category, description, rating, review_count, price_cents, stock FROM products WHERE id = $1', [
     Number(req.params.id) || 0,
   ]);
   if (!rows[0]) return res.status(404).json({ error: 'product not found' });

@@ -155,6 +155,10 @@
             <div class="field-hint" id="hPhone"></div>
           </div>
 
+          <!-- Announced before the fields it disables, so the cause of the greyed
+               inputs is read first rather than discovered afterwards. -->
+          <div class="demo-notice" id="shipNotice" role="status" hidden></div>
+
           <div class="field" style="margin-top: 4px">
             <label style="display: flex; align-items: flex-start; gap: 8px; font-weight: 500">
               <input type="checkbox" id="fSeedBug" style="width: auto; margin-top: 2px" />
@@ -167,6 +171,9 @@
         </div>
 
         <div class="view" id="viewPayment" hidden>
+          <!-- The same warning repeated here: "Place order" lives on this step,
+               and this is where an address-less payload used to surprise. -->
+          <div class="demo-notice" id="payNotice" role="status" hidden></div>
           <div class="testcards">
             <button class="testcard-btn" id="declineCard">Use decline test card</button>
             <button class="testcard-btn" id="approveCard">Use approving test card</button>

@@ -396,6 +396,58 @@ function setField(inputId, hintId, valid, msg) {
   hint.className = `field-hint ${valid ? 'ok' : 'err'}`;
 }
 
+/** True when the demo switch is on: this order is sent WITHOUT an address. */
+const demoOmitsAddress = () => $('fSeedBug').checked;
+
+/**
+ * Build the exact request body that will be POSTed.
+ *
+ * SINGLE SOURCE OF TRUTH — this is the one and only place the order payload is
+ * assembled, and both the "Continue"/"Place order" gate and the submit call it.
+ *
+ * Why it exists: the gate used to validate the DOM while placeOrder() built the
+ * body from the DOM separately. Two readings of the same fields through two
+ * code paths, free to disagree — and they did. Ticking the demo box made the
+ * gate return "valid" while the body silently dropped shippingAddress, so the
+ * form showed five green "✓ looks good" ticks and the server answered
+ * 400 shippingAddress required. A gate that does not inspect the actual payload
+ * is not a gate.
+ */
+function buildOrderPayload() {
+  const items = [...cart.entries()].map(([productId, qty]) => ({ productId, qty }));
+  const shippingAddress = {
+    name: $('fName').value.trim(),
+    line1: $('fAddr').value.trim(),
+    city: $('fCity').value.trim(),
+    postcode: $('fPin').value.trim(),
+    phone: $('fPhone').value.trim(),
+  };
+  return {
+    items,
+    // The CODE, never an amount — the server recomputes the discount.
+    ...(appliedPromo ? { promoCode: appliedPromo.code } : {}),
+    currency,
+    card: $('fCard').value,
+    // Omitted entirely when the demo box is ticked: the same request a buggy
+    // client would send.
+    ...(demoOmitsAddress() ? {} : { shippingAddress }),
+  };
+}
+
+/**
+ * Mirror of the order service's validateShipTo() contract.
+ *
+ * Deliberately checks the PAYLOAD, not the inputs, and deliberately checks the
+ * same three fields the server requires — {line1, city, postcode} non-empty.
+ * If this ever drifts from services/order/src/index.js the e2e test fails,
+ * because that test asserts on a real response rather than on this function.
+ */
+function payloadAddressAcceptable(payload) {
+  const a = payload.shippingAddress;
+  if (!a || typeof a !== 'object') return false;
+  return [a.line1, a.city, a.postcode].every((x) => typeof x === 'string' && x.trim() !== '');
+}
+
 function shippingValid() {
   const v = (id) => $(id).value.trim();
   const checks = {
@@ -407,12 +459,46 @@ function shippingValid() {
   };
   let allOk = true;
   for (const [id, [ok, hintId, msg]] of Object.entries(checks)) {
+    // In demo mode these values are about to be thrown away, so showing a
+    // green tick beside them would be a lie. Clear the per-field state and let
+    // the banner speak instead.
+    if (demoOmitsAddress()) {
+      $(id).classList.remove('valid', 'invalid');
+      $(checks[id][1]).textContent = '';
+      $(checks[id][1]).className = 'field-hint';
+      continue;
+    }
     setField(id, hintId, ok, msg);
     if (!ok || !v(id)) allOk = false;
   }
-  // The demo path deliberately submits with no address, so the fields must not
-  // gate it — the whole point is to let a bad request reach the backend.
-  return $('fSeedBug').checked || allOk;
+
+  // The demo path deliberately submits a request the server will reject, so it
+  // must be allowed THROUGH the gate — but it is announced, not silent.
+  if (demoOmitsAddress()) return true;
+  // Otherwise the gate asks the same question the server will ask, of the same
+  // object the server will receive.
+  return allOk && payloadAddressAcceptable(buildOrderPayload());
+}
+
+/**
+ * Keep the UI honest about what will actually be sent.
+ * Called whenever the demo switch changes or a step is entered.
+ */
+function syncDemoNotice() {
+  const on = demoOmitsAddress();
+  // Disable the address inputs: a field that cannot affect the request should
+  // not accept typing as though it could.
+  for (const id of ['fName', 'fAddr', 'fCity', 'fPin', 'fPhone']) {
+    $(id).disabled = on;
+    $(id).closest('.field').classList.toggle('disabled', on);
+  }
+  const msg = 'This order will be sent with <b>no shipping address</b> — anything typed above is discarded.';
+  $('shipNotice').innerHTML = on ? msg : '';
+  $('shipNotice').hidden = !on;
+  // The same warning on the payment step, because that is where "Place order"
+  // lives and where the surprise happened.
+  $('payNotice').innerHTML = on ? msg : '';
+  $('payNotice').hidden = !on;
 }
 
 /** Luhn check — catches a mistyped digit that a length check would pass. */
@@ -509,12 +595,14 @@ function setStep(s) {
     next.hidden = false;
     next.textContent = 'Continue';
     $('drawerFoot').hidden = false;
+    syncDemoNotice();
     refreshGate();
   } else if (s === 'payment') {
     back.hidden = false;
     next.hidden = false;
     next.textContent = 'Place order';
     $('drawerFoot').hidden = false;
+    syncDemoNotice();
     refreshGate();
   } else {
     $('drawerFoot').hidden = true;
@@ -526,28 +614,9 @@ function setStep(s) {
 // ---------------------------------------------------------------------------
 async function placeOrder() {
   const next = $('nextBtn');
-  const omitAddress = $('fSeedBug').checked;
-  const items = [...cart.entries()].map(([productId, qty]) => ({ productId, qty }));
-  if (!items.length) return;
-
-  const shippingAddress = {
-    name: $('fName').value.trim(),
-    line1: $('fAddr').value.trim(),
-    city: $('fCity').value.trim(),
-    postcode: $('fPin').value.trim(),
-    phone: $('fPhone').value.trim(),
-  };
-
-  const body = {
-    items,
-    // The CODE, never an amount — the server recomputes the discount.
-    ...(appliedPromo ? { promoCode: appliedPromo.code } : {}),
-    currency,
-    card: $('fCard').value,
-    // Omitted entirely when the demo box is ticked: the same request a buggy
-    // client would send.
-    ...(omitAddress ? {} : { shippingAddress }),
-  };
+  // The SAME object the gate inspected. Built once, here, by one function.
+  const body = buildOrderPayload();
+  if (!body.items.length) return;
 
   next.disabled = true;
   next.textContent = 'Placing order…';
@@ -564,6 +633,11 @@ async function placeOrder() {
     await showConfirmation(res.data.id, session.token);
     cart.clear();
     appliedPromo = null;
+    // Reset the demo switch after a completed order. Left sticky, one
+    // experiment with it silently poisons every subsequent checkout in the
+    // session — which is how the original report happened.
+    $('fSeedBug').checked = false;
+    syncDemoNotice();
     updateBadges();
     await Promise.all([loadProducts(), loadOrders()]); // stock and history both changed
   } catch (err) {
@@ -608,6 +682,7 @@ function showKira(res) {
       cta: 'Go back and add an address',
       action: () => {
         $('fSeedBug').checked = false;
+        syncDemoNotice();
         setStep('shipping');
       },
     };
@@ -780,7 +855,10 @@ $('nextBtn').addEventListener('click', () => {
 
 ['fName', 'fAddr', 'fCity', 'fPin', 'fPhone'].forEach((id) => $(id).addEventListener('input', refreshGate));
 ['fCard', 'fExp', 'fCvv'].forEach((id) => $(id).addEventListener('input', refreshGate));
-$('fSeedBug').addEventListener('change', refreshGate);
+$('fSeedBug').addEventListener('change', () => {
+  syncDemoNotice();
+  refreshGate();
+});
 
 const fillCard = (pan) => {
   $('fCard').value = pan;

@@ -459,6 +459,66 @@ environment — which is the worst possible moment.
 
 ---
 
+## The storefront
+
+**Arbor**, at **http://localhost:8090** — the real customer-facing service, and
+one of the seven the ops dashboard watches.
+
+It is not a mock. Every interaction is a real request through the gateway:
+
+| Action | Call | Service |
+|---|---|---|
+| Product grid | `GET /api/products` | product — catalogue, prices, **live stock** |
+| Place order | `POST /api/orders` | order — reserves stock, writes the order |
+| Confirmation | `GET /api/orders/:id` | orders — the **read** path, SELECT-only role |
+
+The confirmation deliberately reads the order back from the *read* service
+rather than echoing the POST response, which proves the write landed and is
+visible on the read path — the CQRS split doing real work rather than sitting
+in a diagram.
+
+### The incident demo is real
+
+Ticking **"submit without a shipping address"** omits `shippingAddress`
+entirely and renders whatever the backend actually returns:
+
+| Seeded fault | Response |
+|---|---|
+| Disarmed | `400` — `{"error":"shippingAddress {line1, city, postcode} required"}` |
+| Armed | `500` — `{"error":"internal_error","request_id":"…"}` |
+
+Verified end to end: that `request_id` appears in the order service's real logs
+alongside `TypeError: Cannot read properties of undefined (reading 'line1') at
+buildShipTo`. A well-formed order still returns `201` while the fault is armed,
+so it is a **partial** failure — which is what makes it worth diagnosing.
+
+A hard-coded error string would look identical on screen and prove nothing.
+
+### Product photos
+
+Drop 8 JPEGs into [`services/frontend/public/images/`](services/frontend/public/images/),
+named after each product's **SKU** — `tote.jpg`, `mug.jpg`, `scarf.jpg`,
+`shirt.jpg`, `belt.jpg`, `beanie.jpg`, `throw.jpg`, `bookend.jpg`. The SKU
+doubles as the image slug, so there is no mapping table to drift out of sync.
+Until a file exists the card shows a neutral tile labelled with the SKU, so it
+is obvious which photo is missing. No code change is needed.
+
+### Guest checkout
+
+The gateway requires a verified JWT for `POST /orders` and strips any
+client-supplied `x-user-id`, so identity can only come from a token it issued.
+The design has no sign-in, so the storefront registers a throwaway account and
+keeps it in `localStorage`. The order really is placed by an authenticated user
+with their own order history — the security boundary is preserved rather than
+weakened to suit the design.
+
+> **Changing the catalogue resets the database.** Postgres only runs its init
+> scripts on an empty data dir, so editing `db/init/01-schemas.sql` means
+> deleting the PVC (`kubectl -n aiops-dev delete pvc data-postgres-0 pod/postgres-0`)
+> or `docker compose down -v`. Existing orders are lost.
+
+---
+
 ## The dashboard
 
 A live instrument panel plus a terminal-style chat with Kira, at

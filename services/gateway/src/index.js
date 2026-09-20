@@ -74,6 +74,11 @@ app.post('/api/auth/login', auth);
 app.get('/api/products', product);
 app.get('/api/products/:id', product);
 
+// Public: the storefront asks the ORDER service which promo codes exist, rather
+// than hardcoding a list that could drift from the server's. On its own path,
+// not under /api/orders, which is routed to the read service.
+app.get('/api/promo-codes', order);
+
 app.get('/api/users/me', requireAuth, user);
 
 // CQRS split at the edge: reads -> Orders, writes -> Order.

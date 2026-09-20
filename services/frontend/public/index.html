@@ -4,10 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Arbor — Quality goods</title>
-    <meta
-      name="description"
-      content="Arbor storefront — the customer-facing service in a 7-service AIOps system."
-    />
+    <meta name="description" content="Arbor storefront — the customer-facing service in a 7-service AIOps system." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -20,107 +17,196 @@
     <header>
       <div class="header-inner">
         <div class="brand">Arbor</div>
-        <nav id="navTabs" aria-label="Product categories"></nav>
         <div class="header-actions">
           <!-- Points at the Phase 6 ops dashboard. This storefront is one of the
                seven services that dashboard watches. -->
-          <a
-            class="system-link"
-            id="systemLink"
-            href="http://localhost:5173"
-            target="_blank"
-            rel="noopener"
-            title="Opens the AIOps operations dashboard that monitors this service"
-            >System status ↗</a
-          >
+          <a class="system-link" id="systemLink" href="http://localhost:5173" target="_blank" rel="noopener"
+             title="Opens the AIOps operations dashboard that monitors this service">System status ↗</a>
           <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+          <button class="icon-btn" id="ordersBtn" title="Order history" aria-label="Order history">
+            📦<span class="count-badge" id="ordersCount" hidden>0</span>
+          </button>
+          <button class="icon-btn" id="wishBtn" title="Wishlist" aria-label="Wishlist">
+            ♥<span class="count-badge" id="wishCount" hidden>0</span>
+          </button>
           <button class="icon-btn" id="cartBtn" title="Cart" aria-label="Open cart">
-            🛍
-            <span class="cart-count" id="cartCount">0</span>
+            🛍<span class="count-badge" id="cartCount" hidden>0</span>
           </button>
         </div>
       </div>
     </header>
 
     <section class="hero">
-      <h1>Quietly made goods, built to be used.</h1>
-      <p>
-        A small collection of everyday things — textiles, tableware, and a few things for carrying
-        what matters. Every order here is a real request through the gateway to the order service.
-      </p>
+      <h1>Quietly made goods, checkout that catches problems before they happen.</h1>
+      <p>Fields validate as you type. If a payment still fails, Kira explains exactly why and what to do next.</p>
+    </section>
+
+    <section class="filterbar">
+      <div class="tabs" id="navTabs" role="tablist"></div>
+      <div class="searchbox">
+        <input type="text" id="searchInput" placeholder="Search products…" aria-label="Search products" />
+      </div>
+      <div class="sortselect">
+        <select id="sortSelect" aria-label="Sort products">
+          <option value="featured">Featured</option>
+          <option value="price-asc">Price: low to high</option>
+          <option value="price-desc">Price: high to low</option>
+          <option value="rating">Highest rated</option>
+        </select>
+      </div>
+      <div class="currency-toggle" id="currencyToggle" role="group" aria-label="Currency">
+        <button class="cur-btn active" data-cur="USD">$ USD</button>
+        <button class="cur-btn" data-cur="INR">₹ INR</button>
+      </div>
     </section>
 
     <section class="shop">
       <div class="product-grid" id="grid" aria-busy="true">
-        <p class="grid-status" id="gridStatus">Loading the catalogue from the product service…</p>
+        <p class="empty-grid">Loading the catalogue from the product service…</p>
       </div>
     </section>
 
     <footer>
       <p>
-        Arbor is the customer-facing service in a 7-service system, deployed via GitOps and watched
-        by three observability signals. Submitting checkout without a shipping address reproduces
-        the same incident Kira investigates in the ops dashboard.
+        Every field validates before you can submit. Try the decline test card at checkout — the
+        assistant diagnoses the real backend response and tells you how to recover.
       </p>
     </footer>
+
+    <!-- quick view -->
+    <div class="modal-scrim" id="qvScrim">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="qvTitle">
+        <div class="modal-head">
+          <h3 id="qvTitle" style="font-size: 16px"></h3>
+          <button class="icon-btn" id="qvClose" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="qv-visual" id="qvVisual"></div>
+          <div class="card-rating" id="qvRating"></div>
+          <div class="qv-price" id="qvPrice"></div>
+          <div class="qv-desc" id="qvDesc"></div>
+          <div class="qv-row">
+            <button class="btn btn-ghost" id="qvWish">♡ Save</button>
+            <button class="btn btn-primary" id="qvAdd">Add to cart</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- order history -->
+    <div class="modal-scrim" id="ordersScrim">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Order history">
+        <div class="modal-head">
+          <h3 style="font-size: 16px">Order history</h3>
+          <button class="icon-btn" id="ordersClose" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body" id="ordersList"></div>
+      </div>
+    </div>
 
     <div class="scrim" id="scrim"></div>
 
     <aside class="drawer" id="drawer" aria-label="Cart and checkout" aria-hidden="true">
       <div class="drawer-head">
-        <h3 id="drawerTitle">Your cart</h3>
-        <button class="icon-btn" id="closeDrawer" aria-label="Close">✕</button>
+        <div class="drawer-head-top">
+          <h3 id="drawerTitle">Your cart</h3>
+          <button class="icon-btn" id="closeDrawer" aria-label="Close">✕</button>
+        </div>
+        <div class="steps" id="steps">
+          <div class="step-dot active" data-s="cart"></div>
+          <div class="step-dot" data-s="shipping"></div>
+          <div class="step-dot" data-s="payment"></div>
+          <div class="step-dot" data-s="confirm"></div>
+        </div>
       </div>
 
       <div class="drawer-body">
-        <div class="view active" id="viewCart">
+        <div class="view" id="viewCart">
           <div id="cartList"></div>
+          <div id="cartSummary"></div>
         </div>
 
-        <div class="view" id="viewCheckout">
-          <form id="checkoutForm" novalidate>
+        <div class="view" id="viewShipping" hidden>
+          <div class="field">
             <label for="fName">Full name</label>
-            <input type="text" id="fName" placeholder="Jordan Rivera" autocomplete="name" />
-
-            <label for="fAddr1">Address line 1</label>
-            <input type="text" id="fAddr1" placeholder="221 Birchwood Ave" autocomplete="address-line1" />
-
-            <label for="fCity">City</label>
-            <input type="text" id="fCity" placeholder="Springfield" autocomplete="address-level2" />
-
-            <label for="fState">State / PIN</label>
-            <input type="text" id="fState" placeholder="MH 411001" autocomplete="postal-code" />
-
-            <div class="demo-toggle">
-              <input type="checkbox" id="fSeedBug" />
-              <label for="fSeedBug" class="demo-label">
-                Demo: submit without a shipping address. This sends a real order with no address —
-                the backend's actual response is shown, whatever it is.
-              </label>
+            <input type="text" id="fName" autocomplete="name" />
+            <div class="field-hint" id="hName"></div>
+          </div>
+          <div class="field">
+            <label for="fAddr">Address line 1</label>
+            <input type="text" id="fAddr" autocomplete="address-line1" />
+            <div class="field-hint" id="hAddr"></div>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label for="fCity">City</label>
+              <input type="text" id="fCity" autocomplete="address-level2" />
+              <div class="field-hint" id="hCity"></div>
             </div>
-          </form>
+            <div class="field">
+              <label for="fPin">PIN / ZIP</label>
+              <input type="text" id="fPin" autocomplete="postal-code" inputmode="numeric" />
+              <div class="field-hint" id="hPin"></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="fPhone">Phone</label>
+            <input type="text" id="fPhone" autocomplete="tel" inputmode="numeric" />
+            <div class="field-hint" id="hPhone"></div>
+          </div>
 
-          <div class="error-box" id="errorBox" role="alert"></div>
+          <div class="field" style="margin-top: 4px">
+            <label style="display: flex; align-items: flex-start; gap: 8px; font-weight: 500">
+              <input type="checkbox" id="fSeedBug" style="width: auto; margin-top: 2px" />
+              <span style="font-size: 11.5px; line-height: 1.5; color: var(--ink-dim)">
+                Demo: submit with no shipping address. Sends a real order without one — whatever
+                the backend returns is what you will see.
+              </span>
+            </label>
+          </div>
         </div>
 
-        <div class="view" id="viewConfirm">
-          <div class="confirm">
+        <div class="view" id="viewPayment" hidden>
+          <div class="testcards">
+            <button class="testcard-btn" id="declineCard">Use decline test card</button>
+            <button class="testcard-btn" id="approveCard">Use approving test card</button>
+          </div>
+          <div class="field">
+            <label for="fCard">Card number</label>
+            <input type="text" id="fCard" placeholder="4242 4242 4242 4242" inputmode="numeric" autocomplete="cc-number" />
+            <div class="field-hint" id="hCard"></div>
+          </div>
+          <div class="row2">
+            <div class="field">
+              <label for="fExp">Expiry (MM/YY)</label>
+              <input type="text" id="fExp" placeholder="12/28" inputmode="numeric" autocomplete="cc-exp" />
+              <div class="field-hint" id="hExp"></div>
+            </div>
+            <div class="field">
+              <label for="fCvv">CVV</label>
+              <input type="text" id="fCvv" placeholder="123" inputmode="numeric" autocomplete="cc-csc" />
+              <div class="field-hint" id="hCvv"></div>
+            </div>
+          </div>
+          <div id="kiraSlot"></div>
+        </div>
+
+        <div class="view" id="viewConfirm" hidden>
+          <div style="text-align: center; padding: 16px 0">
             <div class="confirm-icon" aria-hidden="true">✓</div>
-            <h3>Order placed</h3>
+            <h3 style="font-size: 17px; margin-top: 6px">Order placed</h3>
             <p class="order-no" id="orderNo"></p>
             <div id="confirmDetail"></div>
-            <p class="confirm-note">
-              Read back from the Orders read-service, which holds SELECT-only access to the order
-              tables.
+            <p style="color: var(--ink-dim); font-size: 12.5px; margin-top: 12px">
+              Read back from the Orders read-service, which holds SELECT-only access.
             </p>
           </div>
         </div>
       </div>
 
       <div class="drawer-foot" id="drawerFoot">
-        <div class="subtotal-row"><span>Subtotal</span><span id="subtotal">$0.00</span></div>
-        <button class="btn-primary" id="primaryAction">Checkout</button>
-        <button class="btn-ghost" id="secondaryAction" hidden>Back to cart</button>
+        <button class="btn btn-ghost" id="backBtn" hidden>Back</button>
+        <button class="btn btn-primary" id="nextBtn">Checkout</button>
       </div>
     </aside>
 

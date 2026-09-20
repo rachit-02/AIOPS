@@ -270,7 +270,10 @@ nav {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-weight: 600;
-  color: rgba(32, 28, 24, 0.38);
+  /* Token, not a literal. A hardcoded dark rgba() here was invisible against
+     the dark-theme panel - which is exactly the failure the no-literal-colour
+     rule exists to prevent. */
+  color: var(--ink-faint);
 }
 .card-body {
   padding: 13px 14px 15px;

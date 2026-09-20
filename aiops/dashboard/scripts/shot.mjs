@@ -9,7 +9,10 @@
  *
  *   node scripts/shot.mjs <url> <out.png> [waitMs] [height]
  */
-const [url, out, waitMs = '15000', height = '1000', width = '1600'] = process.argv.slice(2);
+const [url, out, waitMs = '15000', height = '1000', width = '1600', evalFile] = process.argv.slice(2);
+// Optional JS file evaluated in the page before the capture, so a screenshot
+// can show a state that only exists after interaction (a drawer open, a real
+// error rendered) rather than only the initial paint.
 const PORT = 9333;
 
 const { spawn } = await import('node:child_process');
@@ -67,8 +70,20 @@ const send = (method, params = {}) =>
 
 await new Promise((r) => ws.addEventListener('open', r));
 await send('Page.enable');
+await send('Runtime.enable');
 await send('Page.navigate', { url });
 await sleep(Number(waitMs));
+
+if (evalFile) {
+  const { readFileSync } = await import('node:fs');
+  const expression = readFileSync(evalFile, 'utf8');
+  const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  if (r?.exceptionDetails) {
+    console.error('page script threw:', r.exceptionDetails.text ?? JSON.stringify(r.exceptionDetails).slice(0, 300));
+  } else if (r?.result?.value !== undefined) {
+    console.log('page script ->', JSON.stringify(r.result.value).slice(0, 400));
+  }
+}
 const { data } = await send('Page.captureScreenshot', { format: 'png' });
 writeFileSync(out, Buffer.from(data, 'base64'));
 console.log(`captured ${out} after ${waitMs}ms`);

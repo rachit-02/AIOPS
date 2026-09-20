@@ -125,9 +125,14 @@ function visual(p, cls) {
   const src = `/images/${p.sku}.jpg`;
   // onerror swaps to the placeholder, so dropping a real photo into
   // public/images/ is the only step needed to replace it — no code change.
+  //
+  // The parent is captured BEFORE removing the img: remove() detaches the node,
+  // after which this.parentElement is null and the placeholder class silently
+  // never gets added. The cards then render as blank tiles with no label saying
+  // which file is missing — which is the one thing the placeholder is for.
   return `<div class="${cls}" data-sku="${p.sku}">
     <img src="${src}" alt="${p.name}" loading="lazy"
-         onerror="this.remove(); this.parentElement.classList.add('placeholder');" />
+         onerror="var b=this.parentElement; this.remove(); if(b) b.classList.add('placeholder');" />
   </div>`;
 }
 

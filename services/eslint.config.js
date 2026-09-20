@@ -36,5 +36,12 @@ export default [
     // Tests boot real servers and assert on them; console output is useful there.
     files: ['**/test/**/*.js'],
     rules: { 'no-console': 'off' },
+    languageOptions: {
+      // Browser globals too: the e2e suite passes callbacks to page.evaluate()
+      // and waitForFunction(), whose bodies are serialised and executed INSIDE
+      // the page. They are browser code that merely lives in a Node file, so
+      // `document` and `localStorage` there are correct, not undefined.
+      globals: { ...globals.node, ...globals.browser },
+    },
   },
 ];

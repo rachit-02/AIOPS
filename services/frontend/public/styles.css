@@ -322,3 +322,26 @@ footer p { font-size: 11.5px; color: var(--ink-faint); max-width: 440px; margin:
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ---------------------------------------------------------------------------
+   Demo-mode notice
+   Shown whenever the "submit with no shipping address" switch is on. It is
+   loud on purpose: the switch changes what gets SENT, and a quiet checkbox two
+   steps back was enough to make a fully-filled form fail with
+   "shippingAddress required" and look like a frontend bug.
+   --------------------------------------------------------------------------- */
+.demo-notice {
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--ink);
+  padding: 9px 11px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin-bottom: 12px;
+}
+.demo-notice b { color: var(--accent-dark); }
+/* A field that cannot affect the request should not look like it can. */
+.field.disabled label { opacity: 0.45; }
+.field.disabled input { opacity: 0.45; cursor: not-allowed; }

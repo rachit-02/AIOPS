@@ -121,8 +121,70 @@ jobs:
 
       # Real tests in _shared; explicit placeholders elsewhere (they print a
       # PLACEHOLDER banner so a green check is never mistaken for coverage).
+      #
+      # frontend is EXCLUDED here on purpose: its suite drives a real browser
+      # against a running stack, so it needs docker compose and a Chromium
+      # download. It runs in the dedicated `e2e` job below, which is also a
+      # required input to `build` - so skipping it here weakens nothing.
       - name: Test
+        if: matrix.package != 'frontend'
         run: npm test --prefix services/${{ matrix.package }}
+
+  # ---------------------------------------------------------------------------
+  # End-to-end checkout tests.
+  #
+  # These exist because of a bug that no unit test could have caught: every
+  # validator was individually correct, but the submit gate read the DOM while
+  # the request body was serialised from the DOM by a SEPARATE code path, so
+  # the two were free to disagree - and did, silently dropping the shipping
+  # address from a form showing five green ticks.
+  #
+  # The suite therefore runs the real browser against the real services and
+  # asserts on the intercepted payload and the genuine HTTP status. It brings
+  # the whole stack up with docker compose, which is the same compose file used
+  # for local development, so a green run here means a real checkout completed.
+  # ---------------------------------------------------------------------------
+  e2e:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: services/frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci --prefix services/frontend
+
+      # --with-deps pulls the shared libraries Chromium needs on a bare runner.
+      - name: Install Chromium
+        run: npx --prefix services/frontend playwright install --with-deps chromium
+
+      # Builds from source, so the test runs against THIS commit's code rather
+      # than whatever image happens to be in the registry.
+      # Only the services the checkout actually touches. Prometheus and Grafana
+      # are part of local development but contribute nothing to this test, and
+      # leaving them out keeps the job fast.
+      # --wait blocks until every healthcheck passes, so the test never races
+      # a service that is running but not yet accepting connections.
+      - name: Start the stack
+        run: docker compose up -d --build --wait postgres user auth product order orders gateway frontend
+
+      - name: Run checkout e2e tests
+        run: npm test --prefix services/frontend
+
+      # Service logs are the first thing anyone wants when an e2e test fails,
+      # and they are gone once the runner is torn down.
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
 
   # ---------------------------------------------------------------------------
   # Build all 7 images in parallel and push to GHCR.
@@ -130,7 +192,7 @@ jobs:
   build:
     # Only on push to main. PRs get check/ but never touch the registry.
     if: github.event_name == 'push'
-    needs: [prepare, check]
+    needs: [prepare, check, e2e]
     runs-on: ubuntu-latest
     permissions:
       # The ONLY extra permission needed to publish images. GITHUB_TOKEN is

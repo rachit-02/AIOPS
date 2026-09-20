@@ -52,22 +52,22 @@ patches:
 images:
 - name: aiops/auth
   newName: ghcr.io/rachit-02/aiops-auth
-  newTag: 6469d09
+  newTag: 2d7f668
 - name: aiops/frontend
   newName: ghcr.io/rachit-02/aiops-frontend
-  newTag: 6469d09
+  newTag: 2d7f668
 - name: aiops/gateway
   newName: ghcr.io/rachit-02/aiops-gateway
-  newTag: 6469d09
+  newTag: 2d7f668
 - name: aiops/order
   newName: ghcr.io/rachit-02/aiops-order
-  newTag: 6469d09
+  newTag: 2d7f668
 - name: aiops/orders
   newName: ghcr.io/rachit-02/aiops-orders
-  newTag: 6469d09
+  newTag: 2d7f668
 - name: aiops/product
   newName: ghcr.io/rachit-02/aiops-product
-  newTag: 6469d09
+  newTag: 2d7f668
 - name: aiops/user
   newName: ghcr.io/rachit-02/aiops-user
-  newTag: 6469d09
+  newTag: 2d7f668

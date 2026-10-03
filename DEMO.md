@@ -142,7 +142,7 @@ Immediately switch to the **GitHub Actions** tab and show the run starting.
 
 ---
 
-## 4. GitOps (Phase 3) — 2 minutes
+## 4. GitOps (Phase 3) — 3 minutes
 
 Switch to the **ArgoCD** tab.
 
@@ -151,31 +151,80 @@ kubectl get application -n argocd
 ```
 
 > "ArgoCD watches the Git repo and makes the cluster match it. Nobody deploys
-> by hand — if I ran `kubectl edit` right now it would be reverted within two
-> minutes, because self-heal is on and Git is the only source of truth."
+> by hand. Git is the only source of truth."
 
 Show the app tree in the UI: the root app owning `aiops-dev`, and the child
 resources.
 
 ```bash
-kubectl get application aiops-dev -n argocd \
-  -o jsonpath='{.spec.syncPolicy}{"\n"}'
+kubectl get application aiops-dev -n argocd -o jsonpath='{.spec.syncPolicy}'; echo
 ```
 
 > "`prune` and `selfHeal`. Prune means deleting a file from Git deletes the
 > resource. Self-heal means manual drift is corrected automatically."
 
-**Optional, and fast — self-heal reverts drift in seconds, not minutes:**
+### The refresh — do this explicitly, do not wait for auto-sync
+
+**Do not say "and now we watch it sync automatically."** During the rehearsal
+ArgoCD reported `Synced / Healthy` while sitting three commits behind
+origin/main, for 5.5 minutes. If you stand there narrating an auto-sync that
+is not happening, you will be stuck in front of the room with nothing to show.
+
+Make the refresh a deliberate, explained step instead. It is more honest and
+it is a better engineering point.
+
+**First, show the gap. Two commands, side by side:**
+
+```bash
+kubectl get application aiops-dev -n argocd -o jsonpath='{.status.sync.revision}'; echo
+git ls-remote origin main
+```
+
+**The exact line to say:**
+
+> "ArgoCD is reporting Synced and Healthy. But look — that's the commit it
+> synced, and this is what's actually on `main`. They can differ. 'Synced'
+> means 'the cluster matches the revision I last fetched', not 'the cluster
+> matches your latest commit.' It polls every two minutes and that poll is not
+> always reliable, so I'm going to ask it to look now rather than hope."
+
+**The exact click:**
+
+> In the ArgoCD UI, open the **`aiops-dev`** application (click its card on the
+> Applications page). In the toolbar across the top you'll see
+> **SYNC · SYNC STATUS · HISTORY AND ROLLBACK · DELETE · REFRESH**.
+> Click the small **▾ caret on the REFRESH button** and choose **HARD REFRESH**.
+> (Plain **REFRESH** re-reads the cluster; **HARD REFRESH** also bypasses the
+> repo-server's cached manifests, which is the part that was stale.)
+
+Equivalent from the terminal, if the UI is slow — this is what was measured at
+~10 seconds:
+
+```bash
+kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard --overwrite
+```
+
+**Then say:**
+
+> "That's the one place this setup isn't fully hands-off, and it's worth being
+> straight about it. In production you'd wire a webhook from GitHub so a push
+> notifies ArgoCD instead of ArgoCD asking every two minutes. I can't, because
+> this cluster is on my laptop and GitHub can't reach it."
+
+### Optional: prove self-heal (fast — seconds, not minutes)
 
 ```bash
 kubectl scale deploy/product -n aiops-dev --replicas=3   # manual drift
-kubectl get deploy product -n aiops-dev                  # run a few times
+kubectl get deploy product -n aiops-dev                  # run it a few times
 ```
 
-It drops back to 1 almost immediately. Self-heal is event-driven on observed
-drift — it does not wait for the 120s poll. (Note the asymmetry worth
-mentioning if asked: reverting *drift* is instant, but noticing a *new commit*
-is not — see the refresh warning in section 0.)
+It drops back to 1 almost immediately.
+
+> "I just changed production by hand and it was reverted before I finished
+> talking. Note the asymmetry: reverting *drift* is instant, because the
+> controller is watching the cluster and sees it immediately. Noticing a *new
+> commit* is the slow, unreliable half — that's a poll, which is why I refreshed
+> manually a moment ago."
 
 ---
 
@@ -322,7 +371,28 @@ curl -s http://localhost:8090/health
 > "Same string I typed seven minutes ago, now being served by a container
 > built by CI and deployed by ArgoCD. I never ran a deploy command."
 
-If ArgoCD hasn't synced yet, hit **Refresh** in its UI rather than waiting.
+**Do the hard refresh here too — do not wait.** Same caret-on-REFRESH →
+**HARD REFRESH** as in Step 4, or:
+
+```bash
+kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard --overwrite
+```
+
+Then give the image pull time. This is the slow one: every kind node pulls all
+seven new tags from GHCR, measured at **~5 minutes**. If the pods are still
+`ContainerCreating`, say so plainly and show it rather than waiting in silence:
+
+```bash
+kubectl get pods -n aiops-dev
+```
+
+> "They're pulling the images CI just built. On a laptop cluster every node
+> pulls from the registry separately — a real cluster would have a pull-through
+> cache. This is the honest cost of the architecture, not something I'd hide."
+
+If the clock beats you, the git log and the new image tags in the deployment
+spec already prove the pipeline worked; the `curl` is confirmation, not the
+evidence.
 
 ---
 

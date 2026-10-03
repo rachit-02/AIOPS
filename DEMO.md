@@ -1,0 +1,349 @@
+# Mid-sem demo runbook — Phases 1–4
+
+Scope: **local dev → CI/CD → GitOps → observability.** Kira, the ops dashboard
+and the storefront's checkout features are out of scope and should not be
+opened.
+
+Total runtime ~12 minutes, including a live commit that flows all the way to
+the cluster while you talk over it.
+
+---
+
+## 0. The one thing that will sink this demo
+
+**The pipeline takes 5–7 minutes from `git push` to new pods running.** Measured,
+not estimated:
+
+| Stage | Time |
+|---|---|
+| GitHub Actions (8 checks → e2e → 7 image builds → gitops commit) | **~3m35s** |
+| ArgoCD notices the commit (polls every 120s, no webhook) | **0–2m** |
+| Rollout | **~35s** |
+
+So you **push at the very start** (Step 3) and come back to it at the end
+(Step 7). Do not stand and watch it. The observability walkthrough is what
+fills the gap, and it is the best part anyway.
+
+If you are short on time, you can skip ArgoCD's poll by hitting **Refresh** in
+its UI — that is a legitimate operation, not a cheat, and worth saying so.
+
+---
+
+## 1. Pre-demo checklist (start ~20 minutes early)
+
+```bash
+# 1. Docker Desktop must be running BEFORE anything else.
+docker info >/dev/null && echo "docker ok"
+
+# 2. Compose must be DOWN. The cluster and compose together exceed the
+#    memory available to Docker, and cluster-up.sh refuses to run otherwise.
+cd /d/Major/AiOps
+docker compose ps -q        # must print nothing
+docker compose down         # if it printed anything
+
+# 3. Free up resources: unrelated containers compete with the cluster.
+docker ps --format '{{.Names}}\t{{.Status}}' | grep -v aiops-local
+#    Stop anything crash-looping (honeypot-*) and any other project stack.
+#    docker stop honeypot-1 honeypot-2 honeypot-3
+
+# 4. Cluster up and every pod READY. After a Docker restart this takes
+#    90-120 seconds - do not start the demo while anything is 0/1.
+kubectl get pods -A --no-headers | awk '{split($3,a,"/"); if (a[1]!=a[2] || $4!="Running") print}'
+#    Empty output = good to go.
+
+# 5. All four surfaces answering.
+curl -s -o /dev/null -w "frontend   %{http_code}\n" http://localhost:8090/health
+curl -s -o /dev/null -w "argocd     %{http_code}\n" http://localhost:8091/
+curl -s -o /dev/null -w "grafana    %{http_code}\n" http://localhost:3031/api/health
+curl -s -o /dev/null -w "prometheus %{http_code}\n" http://localhost:9091/-/ready
+#    All must be 200. Grafana is the flaky one - see Troubleshooting.
+
+# 6. Start traffic in its OWN terminal and leave it running all demo.
+bash scripts/traffic.sh
+#    Charts need ~2 minutes of traffic before rate() windows fill.
+
+# 7. Confirm the charts actually have data before you present them.
+curl -s --get --data-urlencode 'query=sum by (job) (rate(http_requests_total{namespace="aiops-dev"}[1m]))' \
+  http://localhost:9091/api/v1/query | grep -o '"job":"[a-z]*"' | sort -u
+#    Should list several services. Empty = traffic is not reaching the cluster.
+```
+
+**Tabs to open, in this order (left to right):**
+
+| Tab | URL | Login |
+|---|---|---|
+| GitHub Actions | `https://github.com/rachit-02/AIOPS/actions` | — |
+| ArgoCD | `http://localhost:8091` | `admin` / `akM8vSdqSJBIyEJR` |
+| Grafana — Three Signals | `http://localhost:3031/d/aiops-three-signals` | `admin` / `admin` |
+| Storefront | `http://localhost:8090` | — |
+
+Plus two terminals: one running `traffic.sh`, one free for commands.
+
+---
+
+## 2. Local development (Phase 1) — 90 seconds
+
+> "Seven Node services. One shared library gives all of them the same three
+> ops endpoints, so observability isn't bolted on per service."
+
+```bash
+cat docker-compose.yml | head -30
+ls services/
+```
+
+Show `services/_shared/index.js` — the `/health`, `/ready`, `/metrics` block.
+
+> "`/health` is liveness — it never touches the database. `/ready` checks
+> Postgres. If liveness checked the database, one DB blip would restart every
+> healthy pod and turn a recoverable outage into a crash loop."
+
+**Say:** the same code runs under compose locally and as an image in the
+cluster. No "works on my machine" gap.
+
+---
+
+## 3. Push the live change NOW (Phase 2) — 2 minutes
+
+Make the edit described in `CHANGE.md` (one line in
+`services/_shared/index.js`), then:
+
+```bash
+git add services/_shared/index.js
+git commit -m "feat(_shared): report build version on /health"
+git push origin main
+```
+
+Immediately switch to the **GitHub Actions** tab and show the run starting.
+
+> "That push just started the pipeline. It lints and tests all eight packages,
+> runs a real browser end-to-end test, builds seven images, pushes them to the
+> registry, and then — this is the important bit — it commits the new image
+> tags back to this repo. It never runs `kubectl`. The pipeline stops at the
+> edge of the cluster."
+
+**Then leave it. Go to Step 4.** Come back in Step 7.
+
+---
+
+## 4. GitOps (Phase 3) — 2 minutes
+
+Switch to the **ArgoCD** tab.
+
+```bash
+kubectl get application -n argocd
+```
+
+> "ArgoCD watches the Git repo and makes the cluster match it. Nobody deploys
+> by hand — if I ran `kubectl edit` right now it would be reverted within two
+> minutes, because self-heal is on and Git is the only source of truth."
+
+Show the app tree in the UI: the root app owning `aiops-dev`, and the child
+resources.
+
+```bash
+kubectl get application aiops-dev -n argocd \
+  -o jsonpath='{.spec.syncPolicy}{"\n"}'
+```
+
+> "`prune` and `selfHeal`. Prune means deleting a file from Git deletes the
+> resource. Self-heal means manual drift is corrected automatically."
+
+**Optional, if you want to prove it** (takes ~90s, only if you are ahead of
+time):
+
+```bash
+kubectl scale deploy/product -n aiops-dev --replicas=3   # manual drift
+# watch ArgoCD revert it within ~2 minutes
+```
+
+---
+
+## 5. Observability — the three signals (Phase 4) — 3 minutes
+
+Switch to the **Grafana** tab, `AIOps — Three Signals`.
+
+> "Three independent signals, from three independent systems. That
+> independence is the point — any one of them can lie."
+
+- **Signal 1, pod health** — from the Kubernetes API via kube-state-metrics.
+- **Signal 2, metrics** — Prometheus scraping each service's `/metrics`.
+- **Signal 3, logs** — Loki, shipped by Fluent Bit.
+
+> "Watch the error rate panel. Right now it reads 0% — not blank. That took a
+> fix: the query divides a 5xx rate by a total rate, and when nothing is
+> failing the numerator has no series at all, so the panel rendered empty. An
+> empty panel and a broken panel look identical, which is the worst possible
+> failure for a chart whose job is to tell you something is wrong."
+
+### The incident (this is the money shot)
+
+**Arm it through Git. Do NOT use `kubectl set env` — ArgoCD self-heal reverts
+it within SECONDS and the incident never fires at all.**
+
+Tested twice. The second time, ArgoCD had already reverted the change at
+08:32:42, before `kubectl rollout status` even returned at 08:32:48 — self-heal
+is event-driven, it does not wait for the 120s poll. The deployment never ran
+with the fault armed, and the error rate stayed flat at 0% for two and a half
+minutes while I waited for an incident that was never happening.
+
+Edit `infra/k8s/base/order/deployment.yaml`, line ~35:
+
+```yaml
+            - name: SEED_BUG_NULL_SHIPPING
+              value: "false"      # <-- change to "true"
+```
+
+```bash
+git add infra/k8s/base/order/deployment.yaml
+git commit -m "chore(demo): enable seeded Order-service incident"
+git push origin main
+```
+
+This path does **not** trigger CI — the workflow only watches `services/**` —
+so it is just the ArgoCD poll plus a rollout: **~30 seconds to 2.5 minutes**.
+Hit **Refresh** in the ArgoCD UI to skip the poll.
+
+> "Breaking production also happens through Git. There is no button for this
+> and no `kubectl` — I commit the fault, ArgoCD delivers it. Which means the
+> incident is reviewable, attributable and revertible, exactly like a feature."
+
+Wait ~60 seconds with traffic running, then on the dashboard:
+
+- **Pod health: still green.** Nothing restarted; the process didn't die.
+- **Error rate: climbing** (the generator sends an address-less order every
+  third cycle — those now 500 instead of 400).
+- **Error logs: the TypeError stack, pointing at `buildShipTo`.**
+
+> "This is the whole argument for three signals. Health alone says the system
+> is fine. Metrics say something is wrong but not what. Only the logs name the
+> function. Any one signal on its own would have misled you."
+
+Then resolve it the same way:
+
+```bash
+git revert --no-edit HEAD
+git push origin main
+```
+
+> "The fix ships the same way the fault did."
+
+**If you want to prove self-heal instead** (fast, no push, and it is a genuinely
+good moment):
+
+```bash
+kubectl set env deploy/order -n aiops-dev SEED_BUG_NULL_SHIPPING=true
+kubectl set env deploy/order -n aiops-dev --list | grep SEED_BUG
+# Run the second command a few times. It flips back to false within seconds.
+```
+
+> "I just changed production by hand. ArgoCD put it back, because Git says
+> `false` and Git wins. That is self-heal — and it is why the incident has to
+> be committed rather than clicked."
+
+
+---
+
+## 6. Loki directly (optional, 60 seconds)
+
+In Grafana → Explore → Loki:
+
+```logql
+{kubernetes_namespace_name="aiops-dev", level="error"} | json
+```
+
+> "Note the label is `kubernetes_namespace_name`, not `namespace` — Fluent Bit
+> flattens the Kubernetes metadata. Getting that wrong returns an empty result
+> with no error, which is a very easy way to convince yourself there are no
+> logs when there are."
+
+---
+
+## 7. Back to the pipeline — 2 minutes
+
+By now the run should be done.
+
+```bash
+git pull
+git log --oneline -3
+```
+
+> "There's the bot's commit — `chore(deploy): <sha>`. CI wrote the new image
+> tags back to Git. That commit is the handoff: CI's last act is a commit,
+> and ArgoCD takes it from there."
+
+```bash
+git show --stat HEAD
+kubectl get deploy -n aiops-dev \
+  -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image --no-headers
+```
+
+Then the payoff — the change you made in Step 3, now live:
+
+```bash
+curl -s http://localhost:8090/health
+```
+
+> "Same string I typed seven minutes ago, now being served by a container
+> built by CI and deployed by ArgoCD. I never ran a deploy command."
+
+If ArgoCD hasn't synced yet, hit **Refresh** in its UI rather than waiting.
+
+---
+
+## 8. Closing line
+
+> "Every number on those dashboards came from a running system. The failure I
+> showed you is a real unhandled exception in a real service, not a scripted
+> error — and the three signals disagreed with each other in exactly the way
+> that makes the architecture worth having."
+
+---
+
+## Troubleshooting
+
+**Grafana is 000 / not loading.** This is the most likely thing to break — it
+has restarted 29 times and gets slow under memory pressure.
+
+```bash
+kubectl rollout restart deploy/kube-prometheus-stack-grafana -n monitoring
+kubectl rollout status  deploy/kube-prometheus-stack-grafana -n monitoring
+```
+
+Takes ~90 seconds. **Backup plan:** Prometheus at `http://localhost:9091` has
+its own graph UI and needs no login. Paste the same queries there. Have this
+tab already open.
+
+**Charts are blank.** `traffic.sh` isn't running, or hasn't run long enough.
+`rate()` over a 1m window needs ~2 minutes of traffic. Check:
+`curl -s http://localhost:8090/api/products | head -c 80`
+
+**ArgoCD shows Synced but nothing changed.** It is probably telling the truth
+about a file that isn't the one you think. Check the rendered object, not the
+sync status:
+`kubectl get cm <name> -n aiops-dev -o yaml | head -40`
+
+**CI is still running when you need it.** Show the Actions tab live and narrate
+the job graph instead — `check` → `e2e` → `build` → `gitops` is itself the
+story. The dependency arrows make the "nothing ships unless tests pass" point
+without needing the run to finish.
+
+**Pods are 0/1 after starting Docker.** Normal. Wait 90–120 seconds.
+
+**`cluster-up.sh` refuses to start.** Compose is still running:
+`docker compose down`.
+
+---
+
+## Known weak spots, if asked
+
+- **Grafana stability.** Single replica, SQLite, no resource limits tuned, on a
+  laptop kind cluster. It is the least reliable component in the stack.
+- **ArgoCD polls, it isn't pushed to.** No webhook, because the cluster isn't
+  reachable from GitHub. Hence the up-to-2-minute delay.
+- **CI rebuilds all 7 images on any `services/**` change.** There is no
+  per-service path filter, so a one-line comment costs a full rebuild. Correct
+  but wasteful; a `dorny/paths-filter` step would fix it.
+- **Terraform bootstraps the root ArgoCD Application with `kubectl`** via a
+  `local-exec`, because the CRD doesn't exist until the Helm release is
+  installed. So "zero manual kubectl" is not quite true, and it's better to say
+  so than to be caught on it.

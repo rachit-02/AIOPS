@@ -149,6 +149,9 @@ export function createService({ name, pool = null, parseBody = true }) {
   if (parseBody) app.use(express.json({ limit: '100kb' }));
 
   // ---- Ops endpoints ------------------------------------------------------
+  // Liveness only: deliberately does NOT touch Postgres. A liveness probe that
+  // checks a dependency restarts healthy pods during a database blip, turning
+  // a recoverable outage into a crash loop. Dependencies belong in /ready.
   app.get('/health', (req, res) => res.json({ status: 'ok', service: name }));
 
   const readyChecks = [];

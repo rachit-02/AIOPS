@@ -31,6 +31,12 @@ TOKEN=$(curl -s --max-time 10 -X POST "$B/auth/login" -H "$J" \
 
 AUTH="authorization: Bearer $TOKEN"
 ADDR='"shippingAddress":{"line1":"1 Ambient St","city":"Bengaluru","postcode":"560001"}'
+# The order service authorises a payment before writing the order, and an
+# ABSENT card is rejected the same as a bad one. Without this the generator's
+# "healthy" orders all came back 402 and nothing was ever written - invisible
+# on the dashboard, because 402 is a 4xx and the error panel counts 5xx.
+# 4242... is the standard test PAN reserved for an approval.
+CARD='"card":"4242424242424242"'
 echo "generating load against $B  (Ctrl-C to stop)"
 
 n=0
@@ -39,11 +45,11 @@ while true; do
   curl -s -o /dev/null --max-time 10 "$B/products" &
   curl -s -o /dev/null --max-time 10 "$B/orders" -H "$AUTH" &
   curl -s -o /dev/null --max-time 10 -X POST "$B/orders" -H "$AUTH" -H "$J" \
-    -d "{\"items\":[{\"productId\":$((RANDOM % 5 + 1)),\"qty\":1}],$ADDR}" &
+    -d "{\"items\":[{\"productId\":$((RANDOM % 5 + 1)),\"qty\":1}],$ADDR,$CARD}" &
   # Every third cycle, omit the address: 400 normally, 500 during an incident.
   if [ $((n % 3)) -eq 0 ]; then
     curl -s -o /dev/null --max-time 10 -X POST "$B/orders" -H "$AUTH" -H "$J" \
-      -d "{\"items\":[{\"productId\":$((RANDOM % 5 + 1)),\"qty\":1}]}" &
+      -d "{\"items\":[{\"productId\":$((RANDOM % 5 + 1)),\"qty\":1}],$CARD}" &
   fi
   wait
   [ "$DURATION" -gt 0 ] && [ $(( $(date +%s) - START )) -ge "$DURATION" ] && break

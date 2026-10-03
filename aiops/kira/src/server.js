@@ -18,7 +18,7 @@ import { latencySeries, errorRateSeries } from './dashboard-queries.js';
 import { investigate } from './agent.js';
 import { liveIncidentState, incidentHistory, setIncident } from './incident.js';
 
-const PORT = Number(process.env.KIRA_API_PORT) || 7777;
+const PORT = Number(process.env.KIRA_API_PORT) || 8090;
 
 // The seeded fault lives in the order service specifically (see the SEEDED BUG
 // banner in services/order/src/index.js). Named here so the UI can show WHICH

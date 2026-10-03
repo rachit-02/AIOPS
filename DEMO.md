@@ -11,21 +11,38 @@ the cluster while you talk over it.
 
 ## 0. The one thing that will sink this demo
 
-**The pipeline takes 5–7 minutes from `git push` to new pods running.** Measured,
-not estimated:
+**A `services/**` change takes 8–12 minutes from `git push` to new pods
+serving.** Measured end to end on 2026-10-03, not estimated:
 
-| Stage | Time |
-|---|---|
-| GitHub Actions (8 checks → e2e → 7 image builds → gitops commit) | **~3m35s** |
-| ArgoCD notices the commit (polls every 120s, no webhook) | **0–2m** |
-| Rollout | **~35s** |
+| Stage | Measured | Notes |
+|---|---|---|
+| GitHub Actions (8 checks → e2e → 7 image builds → gitops commit) | **3m21s** | e2e alone is 2m27s |
+| ArgoCD picks up the commit | **10s forced / 4m+ polled** | see the warning below |
+| Image pull + rollout | **~5m** | kind pulls every new tag from GHCR per node |
+
+An **infra-only** change (the incident toggle) is much faster — no CI, no image
+pull. Measured: push `09:10:18Z` → fault live `09:14:17Z` = **3m59s** polled,
+and ~10 seconds if you force the refresh.
 
 So you **push at the very start** (Step 3) and come back to it at the end
-(Step 7). Do not stand and watch it. The observability walkthrough is what
-fills the gap, and it is the best part anyway.
+(Step 7). Do not stand and watch it. The observability walkthrough fills the
+gap, and it is the best part anyway.
 
-If you are short on time, you can skip ArgoCD's poll by hitting **Refresh** in
-its UI — that is a legitimate operation, not a cheat, and worth saying so.
+### Do not trust ArgoCD's auto-sync. Force the refresh.
+
+During the dry run ArgoCD reported **`Synced / Healthy` while sitting on a
+commit three revisions behind origin/main**, for 5.5 minutes. `reconciledAt`
+was frozen despite the 120s interval. The status was literally true — it *was*
+synced to that revision — it just was not synced to anything recent.
+
+A hard refresh fixed it in 10 seconds:
+
+```bash
+kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard --overwrite
+```
+
+Or the **Refresh** button in the UI. Use it every time; it is a legitimate
+operation, not a cheat, and worth saying so out loud.
 
 ---
 
@@ -148,13 +165,17 @@ kubectl get application aiops-dev -n argocd \
 > "`prune` and `selfHeal`. Prune means deleting a file from Git deletes the
 > resource. Self-heal means manual drift is corrected automatically."
 
-**Optional, if you want to prove it** (takes ~90s, only if you are ahead of
-time):
+**Optional, and fast — self-heal reverts drift in seconds, not minutes:**
 
 ```bash
 kubectl scale deploy/product -n aiops-dev --replicas=3   # manual drift
-# watch ArgoCD revert it within ~2 minutes
+kubectl get deploy product -n aiops-dev                  # run a few times
 ```
+
+It drops back to 1 almost immediately. Self-heal is event-driven on observed
+drift — it does not wait for the 120s poll. (Note the asymmetry worth
+mentioning if asked: reverting *drift* is instant, but noticing a *new commit*
+is not — see the refresh warning in section 0.)
 
 ---
 
@@ -200,8 +221,9 @@ git push origin main
 ```
 
 This path does **not** trigger CI — the workflow only watches `services/**` —
-so it is just the ArgoCD poll plus a rollout: **~30 seconds to 2.5 minutes**.
-Hit **Refresh** in the ArgoCD UI to skip the poll.
+and needs no image pull, so it is just ArgoCD plus a restart. Measured:
+**3m59s** waiting on the poll, **~10 seconds** if you force the refresh. Force
+it.
 
 > "Breaking production also happens through Git. There is no button for this
 > and no `kubectl` — I commit the fault, ArgoCD delivers it. Which means the
@@ -217,6 +239,20 @@ Wait ~60 seconds with traffic running, then on the dashboard:
 > "This is the whole argument for three signals. Health alone says the system
 > is fine. Metrics say something is wrong but not what. Only the logs name the
 > function. Any one signal on its own would have misled you."
+
+**What the rehearsal actually produced** (2026-10-03), so you know what to
+expect and can tell if something is off:
+
+| Signal | Reading |
+|---|---|
+| Pod health | `order 1/1 Running`, **0 restarts** |
+| Error rate | order **10.5%**, gateway 3.4%, frontend 4.2% (baseline 0.0%) |
+| Logs | `unhandled_error` → `TypeError: Cannot read properties of undefined (reading 'line1')` → `at buildShipTo (index.js:69:21)` |
+
+The error rate decreasing up the chain — order 10.5% → gateway 3.4% →
+frontend 4.2% — is worth pointing at: only a fraction of each upstream
+service's traffic reaches the failing call, so the signal dilutes with
+distance. That is why you alert on the service, not the edge.
 
 Then resolve it the same way:
 
@@ -317,10 +353,19 @@ tab already open.
 `rate()` over a 1m window needs ~2 minutes of traffic. Check:
 `curl -s http://localhost:8090/api/products | head -c 80`
 
-**ArgoCD shows Synced but nothing changed.** It is probably telling the truth
-about a file that isn't the one you think. Check the rendered object, not the
-sync status:
-`kubectl get cm <name> -n aiops-dev -o yaml | head -40`
+**ArgoCD shows Synced but nothing changed.** Two different causes, both seen
+during the dry run.
+
+1. *It is synced to a stale revision.* Compare what it thinks it is on against
+   the remote, then force a refresh:
+   ```bash
+   kubectl get application aiops-dev -n argocd -o jsonpath='{.status.sync.revision}'; echo
+   git ls-remote origin main
+   kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard --overwrite
+   ```
+2. *It applied a file that isn't the one you think.* Check the rendered object,
+   not the sync status:
+   `kubectl get cm <name> -n aiops-dev -o yaml | head -40`
 
 **CI is still running when you need it.** Show the Actions tab live and narrate
 the job graph instead — `check` → `e2e` → `build` → `gitops` is itself the
@@ -341,8 +386,13 @@ without needing the run to finish.
 - **ArgoCD polls, it isn't pushed to.** No webhook, because the cluster isn't
   reachable from GitHub. Hence the up-to-2-minute delay.
 - **CI rebuilds all 7 images on any `services/**` change.** There is no
-  per-service path filter, so a one-line comment costs a full rebuild. Correct
-  but wasteful; a `dorny/paths-filter` step would fix it.
+  per-service path filter, so a one-line comment costs a full rebuild, and then
+  every kind node pulls all 7 new tags from GHCR (~5 minutes). Correct but
+  wasteful; a `dorny/paths-filter` step would fix the rebuild half.
+- **ArgoCD's auto-sync is not reliable here.** It reported Synced/Healthy on a
+  revision three commits stale for 5.5 minutes during the dry run. Forcing the
+  refresh works instantly, but "GitOps converges automatically" deserves the
+  caveat if you are asked.
 - **Terraform bootstraps the root ArgoCD Application with `kubectl`** via a
   `local-exec`, because the CRD doesn't exist until the Helm release is
   installed. So "zero manual kubectl" is not quite true, and it's better to say

@@ -24,9 +24,15 @@ An **infra-only** change (the incident toggle) is much faster — no CI, no imag
 pull. Measured: push `09:10:18Z` → fault live `09:14:17Z` = **3m59s** polled,
 and ~10 seconds if you force the refresh.
 
-So you **push at the very start** (Step 3) and come back to it at the end
-(Step 7). Do not stand and watch it. The observability walkthrough fills the
-gap, and it is the best part anyway.
+**So the live change in Step 3 is an infra-only change** - a replica count in
+`infra/k8s/overlays/dev/kustomization.yaml`. It lands in about a minute with a
+forced refresh, and you watch it land in Step 4 rather than waiting on CI.
+See `CHANGE.md`.
+
+Phase 2 (CI/CD) is then demonstrated in Step 7 from the **last real CI run**
+and the bot commits already in `git log` - which is honest evidence and costs
+no time. Do not push a `services/**` change live unless you have twelve
+minutes to spare and something to fill them with.
 
 ### Do not trust ArgoCD's auto-sync. Force the refresh.
 
@@ -119,26 +125,41 @@ cluster. No "works on my machine" gap.
 
 ---
 
-## 3. Push the live change NOW (Phase 2) — 2 minutes
+## 3. Push the live change NOW — 90 seconds
 
-Make the edit described in `CHANGE.md` (one line in
-`services/_shared/index.js`), then:
+This is the Phase 3 (GitOps) demonstration; Step 4 is where it lands.
+
+Full detail, including the exact edit and the undo, is in `CHANGE.md`.
+
+Open `infra/k8s/overlays/dev/kustomization.yaml`, find:
+
+```yaml
+patches:
+- path: frontend-nodeport.yaml
+```
+
+and add below it:
+
+```yaml
+
+replicas:
+- name: product
+  count: 2
+```
 
 ```bash
-git add services/_shared/index.js
-git commit -m "feat(_shared): report build version on /health"
+git add infra/k8s/overlays/dev/kustomization.yaml
+git commit -m "chore(dev): run two product replicas"
 git push origin main
 ```
 
-Immediately switch to the **GitHub Actions** tab and show the run starting.
+> "I've just told Git I want two copies of the product service. I haven't
+> touched the cluster — no `kubectl`, no deploy command, no CI. The only thing
+> that changed is a file in a repository."
 
-> "That push just started the pipeline. It lints and tests all eight packages,
-> runs a real browser end-to-end test, builds seven images, pushes them to the
-> registry, and then — this is the important bit — it commits the new image
-> tags back to this repo. It never runs `kubectl`. The pipeline stops at the
-> edge of the cluster."
-
-**Then leave it. Go to Step 4.** Come back in Step 7.
+**This path does not trigger CI.** The workflow only watches `services/**`, so
+there is no build, no registry push and no image pull. Go straight to Step 4
+and watch it arrive.
 
 ---
 
@@ -210,6 +231,41 @@ kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard
 > straight about it. In production you'd wire a webhook from GitHub so a push
 > notifies ArgoCD instead of ArgoCD asking every two minutes. I can't, because
 > this cluster is on my laptop and GitHub can't reach it."
+
+### Now watch Step 3's commit arrive
+
+Within a second or two of the refresh the app flips to **`OutOfSync`** and the
+`product` **Deployment** is flagged. Click it, then the **DIFF** tab:
+
+> "Left side is what's running: one replica. Right side is what Git says:
+> two. ArgoCD's whole job is to make the left match the right."
+
+Auto-sync fires; the app returns to **`Synced` / `Healthy`** and a second
+`product-…` pod appears in the resource tree.
+
+```bash
+kubectl get pods -n aiops-dev -l app.kubernetes.io/name=product -o wide
+kubectl get endpointslices -n aiops-dev -l kubernetes.io/service-name=product \n  -o custom-columns=NAME:.metadata.name,ADDRESSES:.endpoints[*].addresses
+```
+
+Two pods, the new one seconds old on the other worker, and the Service now
+listing **two** backend addresses.
+
+> "Seconds, not minutes — the image was already on the node, so nothing was
+> downloaded. And the new pod is in the load-balancing set automatically,
+> because the Service selects on labels, not on a list of addresses I maintain."
+
+The *Replicas ready / desired* panel in Grafana (Step 5) will show `product`
+stepping 1 → 2. Same change, visible in Git, in the cluster, and on the
+dashboard.
+
+**Undo it after the demo** — `CHANGE.md` has both methods; the Git revert is
+the one worth showing:
+
+```bash
+git revert --no-edit HEAD && git push origin main
+kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard --overwrite
+```
 
 ### Optional: prove self-heal (fast — seconds, not minutes)
 
@@ -343,56 +399,45 @@ In Grafana → Explore → Loki:
 
 ---
 
-## 7. Back to the pipeline — 2 minutes
+## 7. CI/CD — the other half (Phase 2) — 2 minutes
 
-By now the run should be done.
+Nothing is pending here: Step 3's change was infra-only and landed in Step 4.
+This step shows the CI half from **evidence already in the repo**, which costs
+no waiting and is no less real.
 
-```bash
-git pull
-git log --oneline -3
-```
+Switch to the **GitHub Actions** tab and open the most recent run on `main`.
 
-> "There's the bot's commit — `chore(deploy): <sha>`. CI wrote the new image
-> tags back to Git. That commit is the handoff: CI's last act is a commit,
-> and ArgoCD takes it from there."
+> "Every push under `services/` runs this. Eight packages linted and tested,
+> then a real browser driving a real checkout against real services, then seven
+> images built and pushed to the registry. Nothing is built until the tests
+> pass, and nothing is pushed until the end-to-end test completes."
 
-```bash
-git show --stat HEAD
-kubectl get deploy -n aiops-dev \
-  -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image --no-headers
-```
+Point at the job graph — `prepare → check ×8 → e2e → build ×7 → gitops`. The
+dependency arrows make the argument without the run needing to be live.
 
-Then the payoff — the change you made in Step 3, now live:
+Then the handoff, which is the part that matters:
 
 ```bash
-curl -s http://localhost:8090/health
+git log --oneline -40 | grep "chore(deploy)"
 ```
 
-> "Same string I typed seven minutes ago, now being served by a container
-> built by CI and deployed by ArgoCD. I never ran a deploy command."
-
-**Do the hard refresh here too — do not wait.** Same caret-on-REFRESH →
-**HARD REFRESH** as in Step 4, or:
+> "Those are the bot's commits. CI's last act isn't a deploy — it's a commit.
+> It writes the new image tags back into this repo and stops. It has no
+> credentials for the cluster and never runs `kubectl`. ArgoCD takes it from
+> there, which is why 'what's deployed?' is answered by `git log`."
 
 ```bash
-kubectl -n argocd annotate application aiops-dev argocd.argoproj.io/refresh=hard --overwrite
+git show --stat $(git log --format=%H -1 --grep="chore(deploy)")
+kubectl get deploy -n aiops-dev   -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image --no-headers
 ```
 
-Then give the image pull time. This is the slow one: every kind node pulls all
-seven new tags from GHCR, measured at **~5 minutes**. If the pods are still
-`ContainerCreating`, say so plainly and show it rather than waiting in silence:
+> "One file changed — the image tags. And those are the exact tags running in
+> the cluster right now. Git and the cluster agree, and that agreement is
+> enforced, not hoped for."
 
-```bash
-kubectl get pods -n aiops-dev
-```
-
-> "They're pulling the images CI just built. On a laptop cluster every node
-> pulls from the registry separately — a real cluster would have a pull-through
-> cache. This is the honest cost of the architecture, not something I'd hide."
-
-If the clock beats you, the git log and the new image tags in the deployment
-spec already prove the pipeline worked; the `curl` is confirmation, not the
-evidence.
+**If you do want to show a live CI run**, start it before the demo begins, not
+during: it is 3m21s for CI plus up to 4 minutes for ArgoCD plus ~5 minutes of
+image pulls across the nodes. Section 0 has the measured breakdown.
 
 ---
 

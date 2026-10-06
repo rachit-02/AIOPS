@@ -65,9 +65,11 @@ grafana:
   persistence:
     enabled: false
 
+  # The request is raised alongside the limit so the scheduler reserves what
+  # Grafana actually uses (~253Mi steady state) rather than a third of it.
   resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits: { memory: 256Mi }
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { memory: ${grafana_memory_limit} }
 
   # BOTH SIGNALS IN ONE PLACE.
   # Prometheus is wired automatically by the chart; Loki is added here so a

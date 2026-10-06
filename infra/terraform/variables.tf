@@ -65,6 +65,29 @@ variable "prometheus_memory_limit" {
   default     = "1536Mi"
 }
 
+variable "grafana_memory_limit" {
+  description = <<-EOT
+    Hard ceiling for Grafana. Raised from 256Mi after repeated OOMKills, then
+    again from 512Mi after measuring it under real dashboard load.
+
+    256Mi: steady-state working set was 253Mi, i.e. ~99% of the ceiling, and
+    the kernel reaped the container roughly every 15 minutes.
+
+    512Mi: fine while idle (~385Mi) but NOT under load. With the Three Signals
+    dashboard open in a browser - refresh 10s, a now-30m window, and a Loki
+    panel doing `| json` over maxLines=1000 - usage climbed to 510Mi within
+    four minutes and the readiness probe began failing. That is the demo
+    workload, so idle numbers were never the right thing to size against.
+
+    1Gi gives roughly 2x headroom over the observed 510Mi peak. The three kind
+    nodes share a single 7.56GiB Docker VM, which had ~3.8GiB free, so this is
+    affordable. Grafana 12's unified apiserver and SQLite store are what the
+    original 256Mi figure predates.
+  EOT
+  type        = string
+  default     = "1Gi"
+}
+
 variable "loki_retention" {
   description = "Log retention in Loki. Same reasoning as prometheus_retention."
   type        = string

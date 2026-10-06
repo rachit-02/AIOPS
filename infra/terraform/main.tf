@@ -81,6 +81,7 @@ resource "helm_release" "kube_prometheus_stack" {
     enable_alertmanager     = var.enable_alertmanager
     prometheus_retention    = var.prometheus_retention
     prometheus_memory_limit = var.prometheus_memory_limit
+    grafana_memory_limit    = var.grafana_memory_limit
     grafana_admin_password  = var.grafana_admin_password
   })]
 

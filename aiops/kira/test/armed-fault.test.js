@@ -180,6 +180,17 @@ test('3: hitting the turn limit makes one final no-tool call and returns a marke
   assert.doesNotMatch(answer, /\[stopped:/);
 });
 
+test('3: three empty model replies return a marked evidence digest instead of throwing', async () => {
+  const client = scripted([
+    { toolCalls: [{ id: 'lo', name: 'fetch_logs', args: { service: 'order', level: 'error' } }] },
+    { text: '' }, { text: '' }, { text: '' },
+  ]);
+  const { answer } = await investigate('checkout failing', { verbose: false, client, runTool: fakeTools });
+  assert.match(answer, /^\*\*Investigation aborted: the model returned empty responses three turns running\*\*/);
+  assert.match(answer, /### Root cause\nNot determined/);
+  assert.match(answer, /error lines for order/);
+});
+
 test('3: if the final call returns nothing, a five-heading digest of the evidence is returned', async () => {
   const client = scripted(toolHappy({ text: '' }));
   const { answer } = await investigate('checkout failing', { verbose: false, client, runTool: fakeTools });

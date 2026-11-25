@@ -495,7 +495,16 @@ ${lag}` : '');
     // ---- No tool calls: the model is trying to conclude -------------------
     if (!res.text.trim()) {
       // Neither text nor tool calls. Usually a small model losing the thread.
-      if (++emptyTurns > 2) throw new Error('Model returned empty responses three turns running; aborting.');
+      if (++emptyTurns > 2) {
+        // Used to THROW, so the caller got an error and no answer at all.
+        // Observed live once (a transient Ollama state: three empty replies
+        // in a row). Return what the evidence shows instead, clearly marked.
+        answer =
+          '**Investigation aborted: the model returned empty responses three turns running** ' +
+          '(often a transient model-server state; re-run the investigation). Evidence gathered so far:\n\n' +
+          evidenceDigest({ metrics: metricsResults, logs: logsResults, health: healthResults });
+        break;
+      }
       messages.push({ role: 'user', text: 'You returned an empty response. Call the tools you still need, or give your final answer.' });
       continue;
     }

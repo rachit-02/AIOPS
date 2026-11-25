@@ -30,6 +30,12 @@ kubectl config current-context            # must print kind-aiops-local
 kubectl get pods -A --no-headers | awk '{split($3,a,"/"); if (a[1]!=a[2] || $4!="Running") print}'
 #    Empty output = ready. After a Docker restart allow 90-120 s.
 
+# 2b. Run restock before the demo: every product back to 50, so nothing in
+#     the storefront is sold out and traffic.sh's orders succeed. One UPDATE,
+#     prints before/after counts. (PowerShell: .\scripts\restock.ps1)
+bash scripts/restock.sh
+#     Just look, change nothing: bash scripts/restock.sh --check
+
 # 3. Warm up Ollama so Kira's first answer is not a 5 GB cold load mid-demo.
 #    keep_alive holds the model in memory for the whole session.
 curl -s http://localhost:11434/api/generate \

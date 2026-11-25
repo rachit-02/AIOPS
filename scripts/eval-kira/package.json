@@ -1,0 +1,11 @@
+{
+  "name": "aiops-eval-kira",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Measures Kira's diagnosis accuracy against seeded faults F1-F6 and a healthy baseline. No dependencies.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}

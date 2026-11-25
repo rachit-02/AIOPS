@@ -9,6 +9,63 @@ the cluster while you talk over it.
 
 ---
 
+## End-sem demo startup
+
+For the end-sem demo Kira, the ops dashboard and the storefront checkout are
+**in scope**. Start things in this order; each step depends on the one before.
+
+> **Docker Desktop's built-in Kubernetes must stay DISABLED**
+> (Settings → Kubernetes → *Enable Kubernetes* unticked). When it is on, it
+> switches the kubectl context to `docker-desktop`, and kubectl, ArgoCD
+> commands and Kira (which reads kubeconfig) all end up looking at the wrong,
+> empty cluster.
+
+```bash
+# 1. Docker Desktop running (whale icon steady), then:
+docker info >/dev/null && echo "docker ok"
+
+# 2. kubectl pointed at the kind cluster, every pod Ready.
+kubectl config use-context kind-aiops-local
+kubectl config current-context            # must print kind-aiops-local
+kubectl get pods -A --no-headers | awk '{split($3,a,"/"); if (a[1]!=a[2] || $4!="Running") print}'
+#    Empty output = ready. After a Docker restart allow 90-120 s.
+
+# 3. Warm up Ollama so Kira's first answer is not a 5 GB cold load mid-demo.
+#    keep_alive holds the model in memory for the whole session.
+curl -s http://localhost:11434/api/generate \
+  -d '{"model":"qwen2.5:7b","prompt":"ok","stream":false,"keep_alive":"2h"}' >/dev/null && echo "ollama warm"
+
+# 4. Kira server (own terminal).
+cd /d/Major/AiOps/aiops/kira
+npm run check          # model + Prometheus + Loki + Kubernetes, each checked separately
+npm run server         # :7777
+
+# 5. Ops dashboard (own terminal).
+cd /d/Major/AiOps/aiops/dashboard
+npm run dev            # :5173
+
+# 6. Traffic (own terminal) - from GIT BASH, not WSL bash.
+cd /d/Major/AiOps
+bash scripts/traffic.sh
+#    Prints a summary line every ~10 requests. "cannot reach ..." means the
+#    shell cannot see localhost:8090 - usually because it is WSL bash.
+```
+
+| Surface | URL | Notes |
+|---|---|---|
+| Storefront (Arbor) | `http://localhost:8090` | served from the cluster |
+| Ops dashboard | `http://localhost:5173` | use `localhost`, not `127.0.0.1` (Vite binds IPv6) |
+| Kira API | `http://localhost:7777` | proxied by the dashboard; no need to open |
+| Grafana — Three Signals | `http://localhost:3031/d/aiops-three-signals` | `admin` / `admin` |
+| ArgoCD | `http://localhost:8091` | see the table in section 1 |
+| Prometheus | `http://localhost:9091` | |
+
+The checkout assistant card in the storefront is a **template filled from the
+order service's response**, and is labelled as such on screen. Live LLM
+diagnosis is the Kira panel in the ops dashboard.
+
+---
+
 ## 0. The one thing that will sink this demo
 
 **A `services/**` change takes 8–12 minutes from `git push` to new pods

@@ -57,10 +57,14 @@ function chargedMoney(order) {
 
 const stars = (r) => '★'.repeat(Math.round(r)) + '☆'.repeat(5 - Math.round(r));
 
-async function api(path, { method = 'GET', body, token } = {}) {
+async function api(path, { method = 'GET', body, token, idempotencyKey } = {}) {
   const res = await fetch(`${API}${path}`, {
     method,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -542,6 +546,12 @@ function paymentValid() {
 }
 
 function refreshGate() {
+  // While an order is in flight nothing may re-enable the submit button: the
+  // card fields and the test-card buttons all call this on input.
+  if (placing) {
+    if (step === 'payment') $('nextBtn').disabled = true;
+    return;
+  }
   if (step === 'shipping') $('nextBtn').disabled = !shippingValid();
   if (step === 'payment') $('nextBtn').disabled = !paymentValid();
 }
@@ -605,32 +615,63 @@ function setStep(s) {
     syncDemoNotice();
     refreshGate();
   } else {
-    $('drawerFoot').hidden = true;
+    // Confirmed: the order is final, so there is nothing to go Back to and no
+    // second order to place. One way out.
+    back.hidden = true;
+    next.hidden = false;
+    next.disabled = false;
+    next.textContent = 'Continue shopping';
+    $('drawerFoot').hidden = false;
   }
 }
 
 // ---------------------------------------------------------------------------
 // Checkout — the real call
 // ---------------------------------------------------------------------------
+/**
+ * True while POST /orders is in flight. Guards every path that could submit a
+ * second time: a fast double click, refreshGate() re-enabling the button on a
+ * card-field input, or Back → Continue → Place order during the request.
+ */
+let placing = false;
+
+/**
+ * Idempotency key for the current checkout attempt. Reused for every retry of
+ * the same cart until an order succeeds, then discarded. The order service only
+ * remembers SUCCESSFUL orders under a key, so retrying after a decline with a
+ * different card still goes through; a duplicate submit of an order that did
+ * succeed gets the original order back instead of a second one.
+ */
+let checkoutKey = null;
+const newCheckoutKey = () =>
+  globalThis.crypto?.randomUUID?.() ?? `ck-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
 async function placeOrder() {
+  if (placing) return;
   const next = $('nextBtn');
+  const back = $('backBtn');
   // The SAME object the gate inspected. Built once, here, by one function.
   const body = buildOrderPayload();
   if (!body.items.length) return;
 
+  placing = true;
+  checkoutKey ??= newCheckoutKey();
   next.disabled = true;
+  back.disabled = true;
   next.textContent = 'Placing order…';
   $('kiraSlot').innerHTML = '';
 
   try {
     const session = await getSession();
-    const res = await api('/orders', { method: 'POST', body, token: session.token });
+    const res = await api('/orders', { method: 'POST', body, token: session.token, idempotencyKey: checkoutKey });
 
     if (!res.ok) {
       showKira(res);
       return;
     }
-    await showConfirmation(res.data.id, session.token);
+    // The order exists. Clear the cart BEFORE the read-back, so no path back
+    // to the payment step can find a full cart and submit it again.
+    checkoutKey = null;
     cart.clear();
     appliedPromo = null;
     // Reset the demo switch after a completed order. Left sticky, one
@@ -639,12 +680,20 @@ async function placeOrder() {
     $('fSeedBug').checked = false;
     syncDemoNotice();
     updateBadges();
+    placing = false;
+    await showConfirmation(res.data.id, session.token);
     await Promise.all([loadProducts(), loadOrders()]); // stock and history both changed
   } catch (err) {
     showKira({ status: 0, data: { error: err.message } });
   } finally {
-    next.disabled = false;
-    next.textContent = 'Place order';
+    placing = false;
+    back.disabled = false;
+    // Only restore the submit button if we are still on the payment step; on
+    // the confirmation step setStep() has already turned it into "Continue shopping".
+    if (step === 'payment') {
+      next.textContent = 'Place order';
+      refreshGate();
+    }
   }
 }
 
@@ -851,6 +900,7 @@ $('nextBtn').addEventListener('click', () => {
   if (step === 'cart') setStep('shipping');
   else if (step === 'shipping') setStep('payment');
   else if (step === 'payment') placeOrder();
+  else if (step === 'confirm') closeDrawer();
 });
 
 ['fName', 'fAddr', 'fCity', 'fPin', 'fPhone'].forEach((id) => $(id).addEventListener('input', refreshGate));

@@ -2,8 +2,10 @@
 // the profile table must not expose password hashes.
 import { createService, createPool, asyncHandler as ah } from '../../_shared/index.js';
 
+import { crashOnStartFromEnv, scheduleCrash } from './fault.js';
+
 const pool = createPool();
-const { app, start } = createService({ name: 'user', pool });
+const { app, start, log } = createService({ name: 'user', pool });
 
 // INTERNAL: called by Auth during registration. The gateway does not route to
 // this endpoint (it only allow-lists GET /api/users/me).
@@ -33,3 +35,6 @@ app.get('/users/me', ah(async (req, res) => {
 }));
 
 start();
+
+// SEEDED FAULT F3 (off unless SEED_CRASH_ON_START=true) - see ./fault.js.
+scheduleCrash({ enabled: crashOnStartFromEnv(), log });

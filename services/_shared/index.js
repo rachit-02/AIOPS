@@ -164,6 +164,10 @@ export function createService({ name, pool = null, parseBody = true }) {
         checks[dep] = 'ok';
       } catch (err) {
         checks[dep] = `fail: ${err.message}`;
+        // Previously silent: a pod that could not reach its database showed
+        // only as NotReady, with the cause nowhere in the logs. Logging only -
+        // the status code and body below are unchanged.
+        log.error({ dependency: dep, err: { message: err.message } }, 'readiness_check_failed');
       }
     }
     const ok = Object.values(checks).every((v) => v === 'ok');

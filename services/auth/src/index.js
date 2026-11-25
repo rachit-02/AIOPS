@@ -8,6 +8,8 @@ const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error('JWT_SECRET is required'); // fail fast rather than sign with a default
 const USER_URL = process.env.USER_SERVICE_URL || 'http://user:3000';
 
+import { leakRateFromEnv, startLeak } from './fault.js';
+
 const pool = createPool();
 const { app, start } = createService({ name: 'auth', pool });
 
@@ -50,3 +52,6 @@ app.post('/auth/login', ah(async (req, res) => {
 }));
 
 start();
+
+// SEEDED FAULT F4 (off unless SEED_MEMORY_LEAK_MB_PER_S is set) - see ./fault.js.
+startLeak({ mbPerSec: leakRateFromEnv() });

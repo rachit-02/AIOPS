@@ -89,3 +89,30 @@ test('x-request-id is generated and echoed', async () => {
   assert.ok(res2.headers.get('x-request-id'));
   server.close();
 });
+
+// Readiness-failure logging (added for fault F5): behaviour - status codes and
+// response bodies - must be exactly as before; the only change is a log line.
+test('/ready: unchanged status and body; a failing dependency is now logged at error level', async () => {
+  let failing = false;
+  const pool = { query: async () => { if (failing) throw new Error('getaddrinfo ENOTFOUND db.example'); return { rows: [] }; } };
+  const { base, server, log } = await boot({ pool });
+  const logged = [];
+  const realError = log.error.bind(log);
+  log.error = (obj, msg) => { logged.push([obj, msg]); };
+
+  const ok = await fetch(`${base}/ready`);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { status: 'ready', checks: { postgres: 'ok' } });
+  assert.equal(logged.length, 0, 'nothing logged while healthy');
+
+  failing = true;
+  const bad = await fetch(`${base}/ready`);
+  assert.equal(bad.status, 503);
+  assert.deepEqual(await bad.json(), { status: 'not_ready', checks: { postgres: 'fail: getaddrinfo ENOTFOUND db.example' } });
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0][1], 'readiness_check_failed');
+  assert.deepEqual(logged[0][0], { dependency: 'postgres', err: { message: 'getaddrinfo ENOTFOUND db.example' } });
+
+  log.error = realError;
+  server.close();
+});

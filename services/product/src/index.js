@@ -1,8 +1,15 @@
 // Product service: catalogue + stock ownership. Only this service may change stock.
 import { createService, createPool, asyncHandler as ah } from '../../_shared/index.js';
 
+import { latencyMiddleware, latencyMsFromEnv } from './fault.js';
+
 const pool = createPool();
 const { app, start } = createService({ name: 'product', pool });
+
+// SEEDED FAULT F2 (off unless SEED_PRODUCT_LATENCY_MS is set) - see ./fault.js.
+// Registered before the routes; when off, nothing is installed.
+const seededDelay = latencyMiddleware(latencyMsFromEnv());
+if (seededDelay) app.use(seededDelay);
 
 app.get('/products', ah(async (req, res) => {
   const { rows } = await pool.query('SELECT id, sku, name, category, description, rating, review_count, price_cents, stock FROM products ORDER BY id');

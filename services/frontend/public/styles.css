@@ -303,6 +303,7 @@ header {
 }
 .kira-card-head b { font-size: 13px; }
 .kira-card-head span { font-size: 11px; color: var(--ink-faint); display: block; }
+.kira-source { font-size: 10.5px; color: var(--ink-faint); padding: 6px 14px; border-bottom: 1px solid var(--line); }
 .kira-body { padding: 13px 14px; font-size: 12.5px; line-height: 1.6; }
 .kira-row { margin-bottom: 9px; }
 .kira-row:last-child { margin-bottom: 0; }

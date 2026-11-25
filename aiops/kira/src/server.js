@@ -135,6 +135,8 @@ app.get(
           name: p.name,
           ready: p.ready,
           restarts: p.restarts,
+          lastRestartAt: p.last_restart_at,
+          restartedRecently: p.restarted_recently,
           state: p.state,
           node: p.node,
         })),

@@ -57,6 +57,9 @@ export const definition = {
   },
 };
 
+/** A restart newer than this counts as current; older ones are history. */
+export const RECENT_RESTART_MS = 10 * 60 * 1000;
+
 const unwrap = (r) => (r && typeof r === 'object' && 'body' in r ? r.body : r);
 
 export async function run({ service }) {
@@ -84,15 +87,23 @@ export async function run({ service }) {
     image: d.spec?.template?.spec?.containers?.[0]?.image ?? null,
   }));
 
+  const now = Date.now();
   const pods = (unwrap(podsRes).items || []).map((p) => {
     const cs = p.status?.containerStatuses?.[0];
     const state = cs?.state || {};
     const stateName = Object.keys(state)[0] ?? 'unknown';
+    // When the previous container instance ended. restartCount is lifetime and
+    // never resets, so 8 restarts from last night's laptop reboot look exactly
+    // like 8 crashes a minute ago. The timestamp is what tells them apart.
+    const lastEnded = cs?.lastState?.terminated?.finishedAt ?? null;
+    const lastEndedMs = lastEnded ? new Date(lastEnded).getTime() : NaN;
     return {
       name: p.metadata.name,
       phase: p.status?.phase,
       ready: cs?.ready ?? false,
       restarts: cs?.restartCount ?? 0,
+      last_restart_at: Number.isFinite(lastEndedMs) ? new Date(lastEndedMs).toISOString() : null,
+      restarted_recently: Number.isFinite(lastEndedMs) && now - lastEndedMs < RECENT_RESTART_MS,
       state: stateName,
       // Populated on CrashLoopBackOff / OOMKilled / ImagePullBackOff - the
       // difference between "waiting to be pulled" and "killed for memory".

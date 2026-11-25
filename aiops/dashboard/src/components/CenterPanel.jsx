@@ -49,11 +49,20 @@ function PodHealth({ pods }) {
   return (
     <div className="flex flex-wrap gap-[6px]">
       {pods.map((p) => {
-        const bad = !p.ready || p.restarts > 0;
+        // Colour = health NOW. Not Ready (or not running) is red. Ready but
+        // restarted in the last ~10 minutes is amber. Otherwise green, however
+        // many lifetime restarts it has: restartCount never resets, so a
+        // Docker/laptop reboot hours ago would otherwise paint every pod red.
+        const colour = !p.ready || p.state !== 'running'
+          ? 'var(--signal-crit)'
+          : p.restartedRecently
+            ? 'var(--signal-warn)'
+            : 'var(--signal-ok)';
+        const lastRestart = p.lastRestartAt ? ` · last restart ${new Date(p.lastRestartAt).toLocaleString()}` : '';
         return (
           <div
             key={p.name}
-            title={`${p.name}\n${p.ready ? 'Ready' : 'NOT ready'} · ${p.restarts} restarts · ${p.state}${p.node ? ` · ${p.node}` : ''}`}
+            title={`${p.name}\n${p.ready ? 'Ready' : 'NOT ready'} · ${p.restarts} restarts${lastRestart} · ${p.state}${p.node ? ` · ${p.node}` : ''}`}
             className="flex items-center justify-center"
             style={{
               width: 26,
@@ -68,7 +77,7 @@ function PodHealth({ pods }) {
                 width: 7,
                 height: 7,
                 borderRadius: '50%',
-                background: bad ? 'var(--signal-crit)' : 'var(--signal-ok)',
+                background: colour,
               }}
             />
           </div>
@@ -203,6 +212,7 @@ export default function CenterPanel({ svc, system, detail, history, pipelineStag
         <div className="mono mt-[10px]" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>
           {svc.pods.filter((p) => p.ready).length}/{svc.pods.length} ready ·{' '}
           {svc.pods.reduce((n, p) => n + p.restarts, 0)} restarts
+          {svc.pods.some((p) => p.restartedRecently) ? ' (recent)' : svc.pods.some((p) => p.restarts > 0) ? ' (none in the last 10 min)' : ''}
           {svc.status === 'crit' && svc.pods.every((p) => p.ready) && (
             <> — pods healthy, so this is application code, not infrastructure</>
           )}

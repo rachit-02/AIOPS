@@ -84,7 +84,7 @@ export class Trace {
     return { name, args, startedAt: Date.now() };
   }
 
-  toolEnd(handle, { ok, result, error, summary }) {
+  toolEnd(handle, { ok, result, error, summary, cached = false }) {
     const ms = Date.now() - handle.startedAt;
     const record = {
       turn: this.currentTurn,
@@ -92,13 +92,16 @@ export class Trace {
       arguments: handle.args,
       duration_ms: ms,
       ok,
+      // A repeat of an earlier identical call, answered from the
+      // investigation's cache rather than by re-querying the source.
+      ...(cached ? { cached: true } : {}),
       // The FULL result is kept in the JSON trace, so a reader can verify the
       // conclusion against exactly what the tool returned.
       result: ok ? result : undefined,
       error: ok ? undefined : error,
     };
     this.toolCalls.push(record);
-    this.onEvent({ type: 'tool_end', tool: handle.name, args: handle.args, ok, summary, error, duration_ms: ms });
+    this.onEvent({ type: 'tool_end', tool: handle.name, args: handle.args, ok, summary, error, duration_ms: ms, cached });
     if (ok) console.log(`    ${c.green}✓${c.reset} ${ms}ms  ${c.dim}→${c.reset} ${summary}`);
     else console.log(`    ${c.red}✗${c.reset} ${ms}ms  ${c.red}${error}${c.reset}`);
     return record;

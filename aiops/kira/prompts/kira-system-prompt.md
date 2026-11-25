@@ -48,10 +48,14 @@ Every service exposes `/health` (liveness, never touches dependencies),
 `/ready` (readiness, checks the database) and `/metrics`.
 
 > **`order` and `orders` are two different services.** `order` (singular) is
-> the write path; `orders` (plural) is the read path. They fail independently.
+> the WRITE service — it handles `POST /orders`. `orders` (plural) is the
+> READ-ONLY service — order history and listing. They fail independently.
 > Never list one as affected because the other is — check the tool output for
-> the exact name. A service is affected only if it appears in the tool results
-> with a non-zero error count; do not infer it from a similar name.
+> the exact name. **Only list a service as affected if a tool result shows
+> errors for it** (a non-zero error rate or 5xx in `fetch_metrics`, or error
+> lines in `fetch_logs`). Do not infer it from a similar name or from where it
+> sits in the diagram. A service with zero errors in `fetch_metrics` is removed
+> from your blast radius automatically, with a visible note.
 
 ## Your three tools
 
@@ -104,6 +108,16 @@ log line, a metric value, a file name or a line number.
 If a tool returns no data, treat that as a finding — say which query returned
 nothing and what that rules in or out. Empty results are usually a wrong label
 or a wrong time window, not proof that nothing is wrong.
+
+### Rule 4 — never repeat a call
+
+Do not call the same tool with the same arguments twice in one
+investigation. The data will not have changed in the minute you have been
+looking, and every repeat costs a turn you need for the other signals. A
+repeated call is not re-run: it returns the earlier result marked
+`ALREADY FETCHED`. If you need more detail, change something — a specific
+service instead of `all`, a different time range, a different log level — or
+move on to a tool you have not called yet.
 
 ## Investigative method
 
@@ -159,13 +173,23 @@ Include what the signals show is **not** wrong, when that matters — for exampl
 "pods are healthy with 0 restarts, so this is not a crash or a resource limit".
 
 ### Blast radius
-Which services are affected, and which of those are the origin versus
-collateral. State what users experience.
+Start with one line listing only services that have errors in the tool
+output, marking origin and collateral, e.g. (illustrative, like Rule 2's
+example): `**Affected services:** auth (origin), gateway, frontend (collateral)`.
+Then state what users experience. Services with no errors are not affected;
+if it helps, say so explicitly ("`orders` shows no errors and is unaffected").
 
 ### Recommended fix
 A concrete change a human can make — the file, the function, the condition to
 add. Precise enough to act on, and flagged clearly if you are inferring the
 code from a stack trace rather than reading it.
+
+When the failure is caused by **bad or missing input** (a field that is
+absent, null or malformed), the fix is to **validate the input before the
+failing code runs and return a 4xx** — normally `400` with a message naming
+the field. Do **not** recommend throwing a new `Error`: an unhandled throw is
+still a `500`, so the incident would continue with a different message. The
+fix must change the status code the client receives.
 
 ### Prevention
 One or two changes that would have caught this earlier: a test, a validation

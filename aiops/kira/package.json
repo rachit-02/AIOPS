@@ -9,7 +9,8 @@
     "check": "node src/index.js --check",
     "demo": "bash test/incident-demo.sh",
     "check:tools": "node test/tool-calling-check.js",
-    "server": "node src/server.js"
+    "server": "node src/server.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.70.0",

@@ -121,7 +121,7 @@ export default function CenterPanel({ svc, system, detail, history, pipelineStag
         {svc.faultArmed && (
           <span
             className="mono font-semibold"
-            title="The seeded fault is enabled on this service. It only produces errors when a request hits the failing path."
+            title={`Seeded fault ${svc.faultId ?? ''} is armed on this service (infra/k8s/faults). Symptoms depend on the fault: errors, latency, or pods that cannot start.`}
             style={{
               fontSize: 11,
               padding: '3px 8px',
@@ -130,7 +130,7 @@ export default function CenterPanel({ svc, system, detail, history, pipelineStag
               color: 'var(--signal-warn)',
             }}
           >
-            fault armed
+            fault {svc.faultId ?? ''} armed
           </span>
         )}
         {svc.image && (

@@ -2,7 +2,8 @@
  * Incident history, newest first.
  *
  * These are not UI events remembered in local state — they are read back from
- * `git log` on the order Deployment manifest. Every incident in this system is
+ * `git log` on the live fault file (infra/k8s/overlays/dev/fault.yaml), plus
+ * the order manifest the original fault (F1) used to be toggled in. Every incident in this system is
  * caused and resolved by a commit, so Git already IS the incident log, with
  * real timestamps and a real author. Keeping a parallel in-memory list would
  * have created a second source of truth that could disagree with the first.
@@ -40,6 +41,7 @@ export default function IncidentHistory({ events }) {
         >
           <span className="min-w-0">
             <span style={{ color: e.type === 'crit' ? 'var(--signal-crit)' : 'var(--signal-ok)' }}>
+              {e.fault && <b style={{ marginRight: 6 }}>{e.fault}</b>}
               {e.text}
             </span>
             <span className="block" style={{ color: 'var(--text-faint)', fontSize: 11 }}>

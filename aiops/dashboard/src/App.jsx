@@ -5,7 +5,7 @@ import CenterPanel from './components/CenterPanel.jsx';
 import KiraPanel from './components/KiraPanel.jsx';
 import CommandPalette from './components/CommandPalette.jsx';
 import Toasts from './components/Toasts.jsx';
-import { getSystem, getServiceDetail, getIncidentHistory, setIncident } from './lib/api.js';
+import { getSystem, getServiceDetail, getIncidentHistory, getFaults, setFault } from './lib/api.js';
 
 const POLL_MS = 5000;
 
@@ -29,6 +29,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [incidentBusy, setIncidentBusy] = useState(false);
+  const [faults, setFaults] = useState([]);
   const [pipelineStage, setPipelineStage] = useState(null);
 
   const prevIncident = useRef(null);
@@ -58,11 +59,12 @@ export default function App() {
       // Toast only on a genuine TRANSITION, never on the first load — landing
       // on an already-broken system should not fire an "incident started" alert
       // for something that happened an hour ago.
-      const active = s.incident?.active;
+      // Track WHICH fault is armed, so switching F2 -> F5 is also a transition.
+      const active = s.incident?.fault?.id ?? 'none';
       if (prevIncident.current !== null && prevIncident.current !== active) {
         pushToast(
-          active ? 'Incident triggered on the Order service' : 'Incident resolved',
-          active,
+          active !== 'none' ? `Fault armed: ${s.incident.fault.label}` : 'Fault disarmed',
+          active !== 'none',
         );
         getIncidentHistory().then(setHistory).catch(() => {});
       }
@@ -80,6 +82,7 @@ export default function App() {
 
   useEffect(() => {
     getIncidentHistory().then(setHistory).catch(() => {});
+    getFaults().then((r) => setFaults(r.faults ?? [])).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -92,25 +95,27 @@ export default function App() {
     };
   }, [selected, system?.at]);
 
-  // ---- incident toggle ---------------------------------------------------
-  const toggleIncident = useCallback(
-    async (enabled) => {
+  // ---- fault arm / disarm ------------------------------------------------
+  // id: 'F1'..'F6' to arm (replacing any armed fault), 'none' to disarm.
+  const changeFault = useCallback(
+    async (id) => {
       if (incidentBusy) return;
       setIncidentBusy(true);
       setPipelineStage('local');
-      setSelected('order');
+      const target = faults.find((f) => f.id === id)?.service ?? system?.incident?.fault?.service;
+      if (target) setSelected(target);
       try {
-        await setIncident(enabled, (event, data) => {
+        await setFault(id, (event, data) => {
           if (event === 'stage') setPipelineStage(data.stage);
           else if (event === 'error') {
-            pushToast(`Incident toggle failed: ${data.message}`, true);
+            pushToast(`Fault change failed: ${data.message}`, true);
             setError(data.message);
           }
         });
         await refresh();
         await getIncidentHistory().then(setHistory).catch(() => {});
       } catch (err) {
-        pushToast(`Incident toggle failed: ${err.message}`, true);
+        pushToast(`Fault change failed: ${err.message}`, true);
       } finally {
         setIncidentBusy(false);
         // Hold the completed pipeline briefly so the final stage is readable,
@@ -118,8 +123,10 @@ export default function App() {
         setTimeout(() => setPipelineStage(null), 2500);
       }
     },
-    [incidentBusy, pushToast, refresh],
+    [incidentBusy, pushToast, refresh, faults, system],
   );
+  // Legacy name used by the palette / older call sites: true = arm F1.
+  const toggleIncident = useCallback((enabled) => changeFault(enabled ? 'F1' : 'none'), [changeFault]);
 
   const askKira = useCallback((q) => {
     window.dispatchEvent(new CustomEvent('kira:ask', { detail: q }));
@@ -164,6 +171,7 @@ export default function App() {
 
   const actions = {
     toggleIncident,
+    changeFault,
     toggleTheme: () => setTheme((t) => (t === 'light' ? 'dark' : 'light')),
     askKira,
     refresh,
@@ -177,7 +185,8 @@ export default function App() {
         theme={theme}
         stale={Boolean(error)}
         incidentBusy={incidentBusy}
-        onToggleIncident={toggleIncident}
+        faults={faults}
+        onChangeFault={changeFault}
         onToggleTheme={actions.toggleTheme}
         onOpenPalette={() => setPaletteOpen(true)}
       />
@@ -231,6 +240,8 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         services={services}
         incidentActive={system?.incident?.active}
+        activeFault={system?.incident?.fault ?? null}
+        faults={faults}
         incidentBusy={incidentBusy}
         actions={actions}
       />

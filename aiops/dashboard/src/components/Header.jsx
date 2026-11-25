@@ -18,9 +18,10 @@ function Clock() {
   );
 }
 
-export default function Header({ system, theme, onToggleTheme, onOpenPalette, incidentBusy, onToggleIncident, stale }) {
+export default function Header({ system, theme, onToggleTheme, onOpenPalette, incidentBusy, faults = [], onChangeFault, stale }) {
   const overall = system?.overall;
-  const incidentActive = system?.incident?.active;
+  const armed = system?.incident?.fault ?? null;
+  const [choice, setChoice] = useState('F1');
 
   return (
     <header
@@ -64,26 +65,47 @@ export default function Header({ system, theme, onToggleTheme, onOpenPalette, in
           <span>{stale ? 'Backend unreachable' : (overall?.text ?? 'Loading…')}</span>
         </div>
 
-        {/* Labelled for the FAULT, not the incident.
-            The pill reports what the telemetry currently shows; this button
-            reports whether the seeded fault is armed. Calling both of them
-            "incident" made them look contradictory in two opposite states:
-            armed but quiet (pill green, button "Resolve"), and disarmed but
-            with errors still inside the rolling window (pill red, button
-            "Trigger"). Naming the button after what it actually controls
-            removes the whole class of confusion. */}
-        <button
-          className="btn btn-danger"
-          onClick={() => onToggleIncident(!incidentActive)}
-          disabled={incidentBusy || !system}
-          title={
-            incidentActive
-              ? 'Disarm the seeded fault in the Order service. Commits to Git; ArgoCD rolls it out (30-90s).'
-              : 'Arm the seeded fault in the Order service. Commits to Git; ArgoCD rolls it out (30-90s).'
-          }
-        >
-          {incidentBusy ? 'Working…' : incidentActive ? 'Disarm seeded fault' : 'Arm seeded fault — Order'}
-        </button>
+        {/* Fault controls, labelled for the FAULT, not the incident: the pill
+            reports what the telemetry shows; these report what is ARMED.
+            Arming commits infra/k8s/overlays/dev/fault.yaml to Git and ArgoCD
+            applies it (no CI build). Arming a fault replaces any armed one. */}
+        <div className="flex items-center gap-[6px]">
+          {armed && (
+            <span className="mono" style={{ fontSize: 11.5, color: 'var(--signal-crit)' }} title={armed.summary}>
+              armed: {armed.label}
+            </span>
+          )}
+          <select
+            className="btn mono"
+            value={choice}
+            onChange={(e) => setChoice(e.target.value)}
+            disabled={incidentBusy || !system || !faults.length}
+            aria-label="Fault to arm"
+            title="Seeded faults F1-F6 (infra/k8s/faults)"
+          >
+            {faults.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.id} · {f.service} · {f.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn btn-danger"
+            onClick={() => onChangeFault(choice)}
+            disabled={incidentBusy || !system || !faults.length || armed?.id === choice}
+            title={faults.find((f) => f.id === choice)?.summary ?? ''}
+          >
+            {incidentBusy ? 'Working…' : armed ? `Switch to ${choice}` : `Arm ${choice}`}
+          </button>
+          <button
+            className="btn"
+            onClick={() => onChangeFault('none')}
+            disabled={incidentBusy || !system || !armed}
+            title="Disarm the armed fault. Commits to Git; ArgoCD rolls it out (30-90s)."
+          >
+            Disarm
+          </button>
+        </div>
 
         <button className="btn mono" onClick={onOpenPalette} title="Command palette (Ctrl/Cmd+K)">
           ⌘K

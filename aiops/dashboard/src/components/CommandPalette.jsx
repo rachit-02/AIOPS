@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
  * Keyboard handling lives on the input rather than the document while open, so
  * arrow keys cannot leak through to the page behind the overlay.
  */
-export default function CommandPalette({ open, onClose, services, incidentActive, incidentBusy, actions }) {
+export default function CommandPalette({ open, onClose, services, incidentActive, activeFault, faults = [], incidentBusy, actions }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const inputRef = useRef(null);
@@ -18,12 +18,19 @@ export default function CommandPalette({ open, onClose, services, incidentActive
 
   const commands = useMemo(() => {
     const base = [
+      ...faults.map((f) => ({
+        id: `fault:${f.id}`,
+        label: `Arm fault ${f.id} — ${f.service}: ${f.name.toLowerCase()}`,
+        hint: incidentBusy ? 'in progress' : activeFault?.id === f.id ? 'armed' : 'fault',
+        disabled: incidentBusy || activeFault?.id === f.id,
+        run: () => actions.changeFault(f.id),
+      })),
       {
-        id: 'incident',
-        label: incidentActive ? 'Disarm the seeded fault' : 'Arm the seeded fault — Order service',
+        id: 'disarm',
+        label: activeFault ? `Disarm ${activeFault.label}` : 'Disarm (no fault armed)',
         hint: incidentBusy ? 'in progress' : 'fault',
-        disabled: incidentBusy,
-        run: () => actions.toggleIncident(!incidentActive),
+        disabled: incidentBusy || !incidentActive,
+        run: () => actions.changeFault('none'),
       },
       {
         id: 'kira',
@@ -43,7 +50,7 @@ export default function CommandPalette({ open, onClose, services, incidentActive
       });
     }
     return base;
-  }, [services, incidentActive, incidentBusy, actions]);
+  }, [services, incidentActive, activeFault, faults, incidentBusy, actions]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

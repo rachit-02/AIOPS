@@ -76,5 +76,18 @@ export async function streamPost(url, body, onEvent, { signal } = {}) {
 export const setIncident = (enabled, onEvent, opts) =>
   streamPost('/api/incident', { enabled }, onEvent, opts);
 
+/** The fault catalogue (F1-F6) plus what the cluster and Git say is armed. */
+export async function getFaults() {
+  const res = await fetch('/api/faults');
+  if (!res.ok) throw new Error(`/api/faults -> ${res.status}`);
+  return res.json();
+}
+
+/** Arm fault `id` ('F1'..'F6') or disarm ('none'); streamed pipeline stages. */
+export const setFault = (id, onEvent, opts) =>
+  id === 'none'
+    ? streamPost('/api/faults/disarm', {}, onEvent, opts)
+    : streamPost(`/api/faults/${encodeURIComponent(id)}/arm`, {}, onEvent, opts);
+
 export const investigate = (question, onEvent, opts) =>
   streamPost('/api/kira/investigate', { question }, onEvent, opts);

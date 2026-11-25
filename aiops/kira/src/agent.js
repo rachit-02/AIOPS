@@ -101,7 +101,9 @@ export function errorEvidence(metricsResults) {
   for (const r of metricsResults) {
     for (const s of r?.services ?? []) {
       seen.add(s.service);
-      const fiveXX = (s.status_counts_since_pod_start ?? []).some((c) => String(c.status).startsWith('5') && c.count > 0);
+      const fiveXX =
+        (s.server_errors_5xx_since_pod_start?.total ?? 0) > 0 ||
+        (s.status_counts_since_pod_start ?? []).some((c) => String(c.status).startsWith('5') && c.count > 0);
       if (s.error_rate_percent > 0 || fiveXX) erroring.add(s.service);
     }
   }
@@ -174,6 +176,68 @@ export function enforceBlastRadius(answer, metricsResults) {
   return { answer: [...lines.slice(0, start + 1), ...kept, ...lines.slice(end)].join('\n'), removed: names };
 }
 
+// ---------------------------------------------------------------------------
+// No-incident guard
+// ---------------------------------------------------------------------------
+
+/**
+ * True when all three signals agree that nothing is failing right now:
+ *  - metrics: every fetch_metrics result has zero 5xx in its window (4xx are
+ *    client responses and do not count), and at least one service was scraped;
+ *  - logs: at least one fetch_logs call at level "error" was made, and every
+ *    error-level result is empty;
+ *  - health: every fetch_health result has all pods Ready and no restart in
+ *    the last 10 minutes.
+ * Any missing signal -> false: the guard only fires on positive evidence.
+ */
+export function noIncidentEvidence({ metrics, logs, health }) {
+  const m = metrics.length > 0
+    && metrics.every((r) => (r.summary?.services_with_errors ?? []).length === 0
+      && (r.services ?? []).every((s) => !(s.error_rate_percent > 0)))
+    && metrics.some((r) => (r.services ?? []).some((s) => s.scrape_up));
+  const errorLogs = logs.filter((r) => r.level_filter === 'error');
+  const l = errorLogs.length > 0 && errorLogs.every((r) => (r.total_matching_lines ?? 0) === 0);
+  const h = health.length > 0 && health.every((r) => {
+    const s = r.summary ?? {};
+    return s.total_pods > 0 && s.ready_pods === s.total_pods && (s.recent_restarts ?? 0) === 0;
+  });
+  return m && l && h;
+}
+
+/** The fixed answer used instead of the model's when the guard fires. */
+export function noIncidentAnswer({ metrics, logs, health }) {
+  const lastMetrics = metrics.at(-1);
+  const measured = (lastMetrics?.services ?? []).map((s) => s.service);
+  const client4xx = Object.entries(lastMetrics?.summary?.client_errors_4xx_since_pod_start ?? {});
+  const logServices = [...new Set(logs.filter((r) => r.level_filter === 'error').map((r) => r.service))];
+  const hs = health.at(-1)?.summary ?? {};
+
+  return [
+    '### Root cause',
+    'No active incident found. None of the three signals shows a server-side failure right now.',
+    '',
+    '### Evidence',
+    `- **Metrics:** ${measured.length} services measured (${measured.join(', ')}) over ${lastMetrics?.query_window ?? 'the window'}; ` +
+      'no 5xx server errors on any service.' +
+      (client4xx.length
+        ? ` 4xx client responses since pod start (${client4xx.map(([s, n]) => `${s} ${n}`).join(', ')}) are ` +
+          'requests the server correctly refused - not a failure.'
+        : ''),
+    `- **Logs:** no error-level lines for ${logServices.join(', ') || 'the services queried'}.`,
+    `- **Health:** ${hs.ready_pods}/${hs.total_pods} pods ready, no restarts in the last 10 minutes.`,
+    '',
+    '### Blast radius',
+    '**Affected services:** none. No service is returning server errors.',
+    '',
+    '### Recommended fix',
+    'No fix needed. If you just armed a fault, ArgoCD needs ~2–3 minutes to roll out; try again shortly.',
+    '',
+    '### Prevention',
+    'Nothing to prevent. _This answer comes from Kira\'s no-incident guard, built directly from the tool ' +
+      'results above; the model\'s own conclusion was not used because the evidence contains no failure._',
+  ].join('\n');
+}
+
 /**
  * @param {object} opts
  * @param {object} [opts.client] Inject a model client. Used by the test suite
@@ -203,6 +267,9 @@ export async function investigate(
   const fetched = new Map();
   /** Every successful fetch_metrics result, for the blast-radius check. */
   const metricsResults = [];
+  /** Every successful fetch_logs / fetch_health result, for the no-incident guard. */
+  const logsResults = [];
+  const healthResults = [];
   let nudgesLeft = config.maxToolNudges;
   let answer = '';
   let turn = 0;
@@ -275,6 +342,8 @@ export async function investigate(
               entry.result = result;
               called.add(call.name);
               if (call.name === 'fetch_metrics') metricsResults.push(result);
+              if (call.name === 'fetch_logs') logsResults.push(result);
+              if (call.name === 'fetch_health') healthResults.push(result);
               trace.toolEnd(handle, { ok: true, result, summary: summarise(call.name, result) });
               return { role: 'tool', toolCallId: call.id, name: call.name, content: JSON.stringify(result) };
             } catch (err) {
@@ -302,7 +371,18 @@ export async function investigate(
 
     const missing = REQUIRED_TOOLS.filter((t) => !called.has(t));
     if (missing.length === 0) {
-      answer = res.text;
+      // No-incident guard. Observed with qwen2.5:7b before a fault was armed:
+      // metrics "no errors", error logs empty, pods healthy - and it still
+      // blamed `order`, citing 401s as "propagated errors". When all three
+      // signals say nothing is failing, the model's conclusion is discarded
+      // and a fixed, evidence-only answer is returned instead.
+      const evidence = { metrics: metricsResults, logs: logsResults, health: healthResults };
+      if (noIncidentEvidence(evidence)) {
+        if (verbose) trace.say('[no-incident guard] all three signals are clean; model conclusion discarded');
+        answer = noIncidentAnswer(evidence);
+      } else {
+        answer = res.text;
+      }
       break;
     }
 

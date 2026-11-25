@@ -109,7 +109,25 @@ If a tool returns no data, treat that as a finding — say which query returned
 nothing and what that rules in or out. Empty results are usually a wrong label
 or a wrong time window, not proof that nothing is wrong.
 
-### Rule 4 — never repeat a call
+### Rule 4 — only 5xx are failures; 4xx are client responses
+
+A **5xx** means the server failed. A **4xx** means the server correctly
+refused a request: `400` bad input, `401`/`403` missing or expired token,
+`404` not found, `409` conflict or out of stock. `fetch_metrics` reports them
+separately (`server_errors_5xx_since_pod_start` vs
+`client_errors_4xx_since_pod_start`).
+
+- **400, 401, 403, 404 and 409 are never a root cause on their own**, and
+  never "propagated errors". `gateway` and `frontend` repeat the same 4xx
+  because they proxy it — that is not a failure spreading.
+- A large 4xx count usually means a client is misbehaving (for example a
+  load generator with an expired token). You may mention it as an
+  observation, but it does not make a service "affected".
+- **If no service has 5xx, error-level logs are empty and pods are healthy,
+  the correct answer is "No active incident found".** Do not construct a
+  root cause from 4xx counts, latency, or the service diagram.
+
+### Rule 5 — never repeat a call
 
 Do not call the same tool with the same arguments twice in one
 investigation. The data will not have changed in the minute you have been

@@ -86,6 +86,14 @@ export async function run({ service, time_range = '15m' }) {
   const pick = (arr, job) => arr.find((r) => r.labels.job === job)?.value;
   const jobs = [...new Set([...rate, ...up].map((r) => r.labels.job))].sort();
 
+  // 5xx and 4xx are reported SEPARATELY, never in one "errors" list. A 4xx is
+  // the server correctly refusing a request (bad input, no/expired token, not
+  // found, conflict). Mixed together, a 7B model read ~3,400 401s from an
+  // expired traffic token as "propagated errors" and invented an incident.
+  const is5xx = (s) => String(s).startsWith('5');
+  const is4xx = (s) => String(s).startsWith('4');
+  const sum = (list) => list.reduce((n, x) => n + x.count, 0);
+
   const services = jobs.map((job) => {
     const rps = pick(rate, job) ?? 0;
     const eps = pick(errRate, job) ?? 0;
@@ -95,27 +103,34 @@ export async function run({ service, time_range = '15m' }) {
       .sort((a, b) => b.count - a.count);
     // Only failing routes: a list of every healthy route is noise that buries
     // the one that matters.
-    const failing = byRoute
+    const routes = byRoute
       .filter((r) => r.labels.job === job && r.value >= 0.5)
       .map((r) => ({ route: r.labels.route, status: r.labels.status, count: Math.round(r.value) }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
+      .sort((a, b) => b.count - a.count);
+    const server = statuses.filter((s) => is5xx(s.status));
+    const client = statuses.filter((s) => is4xx(s.status));
 
     return {
       service: job,
       scrape_up: pick(up, job) === 1,
       requests_per_second: round(rps, 3),
-      // The headline number. clamp avoids 0/0 -> NaN on an idle service.
+      // The headline number: 5xx only, within the window. clamp avoids
+      // 0/0 -> NaN on an idle service.
       error_rate_percent: rps > 0 ? round((eps / rps) * 100) : 0,
       latency_seconds: { p50: round(pick(p50, job), 4), p95: round(pick(p95, job), 4), p99: round(pick(p99, job), 4) },
-      // "since the pod started", NOT "within the query window". Named
-      // explicitly so the number is not misread as a windowed count.
-      status_counts_since_pod_start: statuses,
-      failing_routes: failing,
+      // All counts below are "since the pod started", NOT "within the query
+      // window". Named explicitly so they are not misread as windowed counts.
+      server_errors_5xx_since_pod_start: { total: sum(server), by_status: server },
+      client_errors_4xx_since_pod_start: { total: sum(client), by_status: client },
+      other_responses_since_pod_start: statuses.filter((s) => !is5xx(s.status) && !is4xx(s.status)),
+      // SERVER failures only (5xx). The dashboard reads this field too.
+      failing_routes: routes.filter((r) => is5xx(r.status)).slice(0, 10),
+      client_error_routes_4xx: routes.filter((r) => is4xx(r.status)).slice(0, 10),
     };
   });
 
   const erroring = services.filter((s) => s.error_rate_percent > 0);
+  const with4xx = services.filter((s) => s.client_errors_4xx_since_pod_start.total > 0);
 
   return {
     source: 'prometheus',
@@ -123,7 +138,18 @@ export async function run({ service, time_range = '15m' }) {
     namespace: config.namespace,
     services,
     summary: {
+      // Server errors (5xx) in the query window. This - not 4xx - is what
+      // "erroring" means.
       services_with_errors: erroring.map((s) => s.service),
+      server_errors_5xx_in_window: erroring.length > 0,
+      client_errors_4xx_since_pod_start: Object.fromEntries(
+        with4xx.map((s) => [s.service, s.client_errors_4xx_since_pod_start.total]),
+      ),
+      client_errors_note:
+        '4xx are CLIENT responses (400 validation, 401/403 missing or expired token, 404 not found, ' +
+        '409 conflict/out of stock). The server handled them correctly. They are not server failures, ' +
+        'not a root cause, and not "propagated errors" on their own; gateway and frontend repeat the ' +
+        'same 4xx because they proxy it.',
       // Deliberately phrased as a HINT, not a conclusion. The tool reports the
       // service with the most 5xx; deciding whether that is the origin or just
       // the busiest propagator is the model's job, using the call graph.

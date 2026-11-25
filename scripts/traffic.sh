@@ -60,15 +60,26 @@ done
 email="traffic$(date +%s)@example.com"
 curl -s --max-time 10 -X POST "$B/auth/register" -H "$J" \
   -d "{\"email\":\"$email\",\"name\":\"Traffic\",\"password\":\"password123\"}" >/dev/null
+
+# Tokens expire after 1 hour. This script used to log in ONCE, so any run
+# longer than an hour sent every authenticated request with an expired token:
+# a steady stream of 401 "jwt expired" on gateway and frontend (~3,400 in 15
+# minutes was observed) that reads like an auth incident and wrote no orders.
+# login() is therefore re-run on any 401 and proactively every 50 minutes.
+TOKEN='' AUTH='' TOKEN_AT=0
+login() {
 TOKEN=$(curl -s --max-time 10 -X POST "$B/auth/login" -H "$J" \
   -d "{\"email\":\"$email\",\"password\":\"password123\"}" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-if [ -z "$TOKEN" ]; then
+  AUTH="authorization: Bearer $TOKEN"
+  TOKEN_AT=$(date +%s)
+  [ -n "$TOKEN" ]
+}
+if ! login; then
   [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$B/products")" = 000 ] && unreachable
   echo "could not authenticate against $B (register/login failed - is the auth service healthy?)" >&2
   exit 1
 fi
 
-AUTH="authorization: Bearer $TOKEN"
 ADDR='"shippingAddress":{"line1":"1 Ambient St","city":"Bengaluru","postcode":"560001"}'
 # The order service authorises a payment before writing the order, and an
 # ABSENT card is rejected the same as a bad one. Without this the generator's
@@ -79,7 +90,7 @@ CARD='"card":"4242424242424242"'
 echo "generating load against $B  (Ctrl-C to stop)"
 
 # Each request writes its HTTP status to its own file; tallied after `wait`.
-total=0 ok=0 c4=0 c409=0 c5=0 nores=0 orders=0 last=- next_report=10 seq=0
+total=0 ok=0 c4=0 c409=0 c401=0 c5=0 nores=0 orders=0 last=- next_report=10 seq=0 got401=0
 # Sets NF to the next result file. NOT called via $(...): a subshell would lose seq.
 next_file() { seq=$((seq + 1)); printf -v NF '%s/%08d' "$TMP" "$seq"; }
 req() {
@@ -95,6 +106,7 @@ tally() {
     case "$c" in
       2??) ok=$((ok + 1)) ;;
       409) c4=$((c4 + 1)); c409=$((c409 + 1)) ;;
+      401) c4=$((c4 + 1)); c401=$((c401 + 1)); got401=1 ;;
       4??) c4=$((c4 + 1)) ;;
       5??) c5=$((c5 + 1)) ;;
       *)   nores=$((nores + 1)) ;;
@@ -157,17 +169,26 @@ while true; do
   wait
   tally
 
+  # Expired (or otherwise rejected) token: sign in again rather than keep
+  # sending requests that can only be refused. Also refresh before expiry.
+  if [ "$got401" -eq 1 ] || [ $(( $(date +%s) - TOKEN_AT )) -ge 3000 ]; then
+    [ "$got401" -eq 1 ] && reason='got 401 (token expired?)' || reason='token is 50 min old'
+    if login; then echo "$reason - signed in again" >&2
+    else echo "$reason - re-login FAILED; authenticated requests will keep failing" >&2; fi
+    got401=0
+  fi
+
   # Everything in the first cycles got no response: the stack went away (or
   # was never reachable from this shell). Say so instead of looping silently.
   if [ "$n" -le 2 ] && [ "$nores" -eq "$total" ]; then unreachable; fi
 
   if [ "$total" -ge "$next_report" ]; then
-    printf '[%4d req] ok=%d  4xx=%d (409 out-of-stock=%d)  failed=%d (5xx=%d, no-response=%d)  orders=%d  in-stock=%d  last=%s\n' \
-      "$total" "$ok" "$c4" "$c409" $((c5 + nores)) "$c5" "$nores" "$orders" "$(wc -w <<< "$IN_STOCK")" "$last"
+    printf '[%4d req] ok=%d  4xx=%d (409 out-of-stock=%d, 401=%d)  failed=%d (5xx=%d, no-response=%d)  orders=%d  in-stock=%d  last=%s\n' \
+      "$total" "$ok" "$c4" "$c409" "$c401" $((c5 + nores)) "$c5" "$nores" "$orders" "$(wc -w <<< "$IN_STOCK")" "$last"
     while [ "$next_report" -le "$total" ]; do next_report=$((next_report + 10)); done
   fi
 
   [ "$DURATION" -gt 0 ] && [ $(( $(date +%s) - START )) -ge "$DURATION" ] && break
   sleep 2
 done
-echo "done after $n cycles: $total requests, ok=$ok 4xx=$c4 (409 out-of-stock=$c409) failed=$((c5 + nores)) (5xx=$c5, no-response=$nores), orders placed=$orders"
+echo "done after $n cycles: $total requests, ok=$ok 4xx=$c4 (409 out-of-stock=$c409, 401=$c401) failed=$((c5 + nores)) (5xx=$c5, no-response=$nores), orders placed=$orders"

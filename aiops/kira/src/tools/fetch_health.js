@@ -128,7 +128,11 @@ export async function run({ service }) {
     .sort((a, b) => String(b.last_seen).localeCompare(String(a.last_seen)))
     .slice(0, 15);
 
-  const unhealthy = pods.filter((p) => !p.ready || p.restarts > 0);
+  // Unhealthy = not Ready now, or restarted within the recent window. Old
+  // restarts (a node or Docker Desktop restart hours ago) are history, not a
+  // current infrastructure fault, and must not steer a diagnosis away from code.
+  const unhealthy = pods.filter((p) => !p.ready || p.restarted_recently);
+  const totalRestarts = pods.reduce((n, p) => n + p.restarts, 0);
 
   return {
     source: 'kubernetes_api',
@@ -139,16 +143,24 @@ export async function run({ service }) {
     summary: {
       total_pods: pods.length,
       ready_pods: pods.filter((p) => p.ready).length,
-      total_restarts: pods.reduce((n, p) => n + p.restarts, 0),
-      unhealthy: unhealthy.map((p) => ({ name: p.name, state: p.state, reason: p.state_reason, restarts: p.restarts })),
+      total_restarts: totalRestarts,
+      recent_restarts: pods.filter((p) => p.restarted_recently).length,
+      unhealthy: unhealthy.map((p) => ({
+        name: p.name, ready: p.ready, state: p.state, reason: p.state_reason,
+        restarts: p.restarts, last_restart_at: p.last_restart_at,
+      })),
       // Stated explicitly so the conclusion is unambiguous rather than left to
       // be inferred from an empty array.
       interpretation:
         unhealthy.length === 0
-          ? 'All pods are Ready with no restarts. This RULES OUT crashes, OOM kills, image-pull ' +
-            'failures and scheduling problems. A service returning errors while in this state is ' +
-            'failing inside application code, not infrastructure.'
-          : `${unhealthy.length} pod(s) unhealthy - infrastructure or startup fault is in play.`,
+          ? `All pods are Ready with no restarts in the last ${RECENT_RESTART_MS / 60000} minutes` +
+            (totalRestarts > 0
+              ? ` (the ${totalRestarts} lifetime restart(s) are older, e.g. from a node or Docker restart, and are not a current fault)`
+              : '') +
+            '. This RULES OUT crashes, OOM kills, image-pull failures and scheduling problems. A ' +
+            'service returning errors while in this state is failing inside application code, not infrastructure.'
+          : `${unhealthy.length} pod(s) not Ready or restarted in the last ${RECENT_RESTART_MS / 60000} minutes - ` +
+            'infrastructure or startup fault is in play.',
     },
   };
 }

@@ -45,7 +45,7 @@ export function summarise(name, r) {
     }
     if (name === 'fetch_health') {
       const s = r.summary;
-      return `${s.ready_pods}/${s.total_pods} pods ready, ${s.total_restarts} restarts`;
+      return `${s.ready_pods}/${s.total_pods} pods ready, ${s.total_restarts} restarts (${s.recent_restarts ?? 0} recent)`;
     }
   } catch {
     /* fall through */

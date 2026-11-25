@@ -16,14 +16,13 @@ import { config } from './config.js';
 import { runTool } from './tools/index.js';
 import { latencySeries, errorRateSeries } from './dashboard-queries.js';
 import { investigate } from './agent.js';
-import { liveIncidentState, incidentHistory, setIncident } from './incident.js';
+import { FAULTS, faultById, faultLabel, activeFaultInCluster, activeFaultInGit, faultHistory, setFault } from './faults.js';
 
 const PORT = Number(process.env.KIRA_API_PORT) || 7777;
 
-// The seeded fault lives in the order service specifically (see the SEEDED BUG
-// banner in services/order/src/index.js). Named here so the UI can show WHICH
-// service is armed rather than implying the whole system is.
-const SEEDED_FAULT_SERVICE = 'order';
+// Which service a seeded fault targets comes from the fault catalogue
+// (src/faults.js), so the UI shows WHICH service is armed rather than implying
+// the whole system is.
 
 // Display metadata only. Every STATUS below is derived from live telemetry;
 // nothing here is a hardcoded health value.
@@ -71,10 +70,13 @@ const asyncRoute = (fn) => (req, res) =>
  * 4xx deliberately does not count: a 400 for a malformed request is the
  * service working correctly, not a fault.
  */
-function deriveStatus({ errorRatePercent, podsReady, podsTotal }) {
+function deriveStatus({ errorRatePercent, podsReady, podsTotal, p50Ms }) {
   if (podsTotal > 0 && podsReady < podsTotal) return 'crit';
   if (errorRatePercent >= 5) return 'crit';
   if (errorRatePercent > 0.5) return 'warn';
+  // Slow without failing (fault F2): same threshold fetch_metrics uses for a
+  // latency anomaly. Normal p50 is single-digit ms; bcrypt-bound auth ~375 ms.
+  if (p50Ms != null && p50Ms >= 800) return 'warn';
   return 'ok';
 }
 
@@ -83,13 +85,15 @@ app.get(
   asyncRoute(async (req, res) => {
     const range = String(req.query.range || '15m');
 
-    const [metrics, health, latency, errRate, incidentActive] = await Promise.all([
+    const [metrics, health, latency, errRate, activeFault] = await Promise.all([
       runTool('fetch_metrics', { service: 'all', time_range: range }),
       runTool('fetch_health', { service: 'all' }),
       latencySeries(range).catch(() => ({})),
       errorRateSeries(range).catch(() => ({})),
-      liveIncidentState(),
+      activeFaultInCluster(),
     ]);
+    const armed = activeFault && activeFault !== 'none' ? faultById(activeFault) : null;
+    const incidentActive = armed !== null;
 
     const podsByService = {};
     for (const pod of health.pods) {
@@ -123,6 +127,7 @@ app.get(
           errorRatePercent,
           podsReady: pods.filter((p) => p.ready).length,
           podsTotal: pods.length,
+          p50Ms: m?.latency_seconds?.p50 != null ? Math.round(m.latency_seconds.p50 * 1000) : null,
         }),
         errorRatePercent,
         requestsPerSecond: m?.requests_per_second ?? 0,
@@ -143,7 +148,8 @@ app.get(
         failingRoutes: m?.failing_routes ?? [],
         // Armed != failing. The fault can be armed while the error rate is
         // zero simply because nothing is exercising the failing path.
-        faultArmed: id === SEEDED_FAULT_SERVICE && incidentActive === true,
+        faultArmed: armed?.service === id,
+        faultId: armed?.service === id ? armed.id : null,
         // The running image tag is the short git SHA that produced it, which
         // is how a diagnosis ties back to a specific commit.
         image: health.deployments.find((d) => d.name === id)?.image ?? null,
@@ -173,7 +179,7 @@ app.get(
         return { status: 'warn', text: `Elevated errors — ${elevated.map((s) => s.name).join(', ')}` };
       }
       if (incidentActive) {
-        return { status: 'warn', text: `Fault armed on Order — no errors in the last ${range}` };
+        return { status: 'warn', text: `Fault ${armed.id} armed on ${SERVICE_META[armed.service]?.name ?? armed.service} — no symptoms in the last ${range} yet` };
       }
       return { status: 'ok', text: 'All systems normal' };
     })();
@@ -183,7 +189,10 @@ app.get(
       range,
       namespace: config.namespace,
       overall,
-      incident: { active: incidentActive },
+      incident: {
+        active: incidentActive,
+        fault: armed ? { id: armed.id, name: armed.name, service: armed.service, category: armed.category, summary: armed.summary, label: faultLabel(armed.id) } : null,
+      },
       totalRestarts: health.summary.total_restarts,
       podsReady: health.summary.ready_pods,
       podsTotal: health.summary.total_pods,
@@ -216,30 +225,52 @@ app.get(
 app.get(
   '/api/incident',
   asyncRoute(async (req, res) => {
-    res.json({ active: await liveIncidentState() });
+    const active = await activeFaultInCluster();
+    res.json({ active: active === null ? null : active !== 'none', fault: active });
   }),
 );
 
 app.get(
   '/api/incident/history',
   asyncRoute(async (req, res) => {
-    res.json({ events: await incidentHistory(25) });
+    res.json({ events: await faultHistory(25) });
   }),
 );
+
+/** The fault catalogue, plus what the cluster and Git say is armed. */
+app.get(
+  '/api/faults',
+  asyncRoute(async (req, res) => {
+    const [cluster, gitState] = await Promise.all([activeFaultInCluster(), activeFaultInGit()]);
+    res.json({ faults: FAULTS, active: { cluster, git: gitState } });
+  }),
+);
+
+/** Arm / disarm, streamed as pipeline stages (Git -> push -> ArgoCD -> cluster). */
+function faultStream(res, id, startText) {
+  const stream = sse(res);
+  stream.send('stage', { stage: 'start', detail: startText });
+  setFault(id, (stage, detail) => stream.send('stage', { stage, detail }))
+    .then(() => stream.send('done', { fault: id, enabled: id !== 'none' }))
+    .catch((err) => stream.send('error', { message: err.message }))
+    .finally(() => stream.end());
+}
+app.post('/api/faults/:id/arm', (req, res) => {
+  const f = faultById(req.params.id);
+  if (!f) return res.status(404).json({ error: `unknown fault "${req.params.id}"` });
+  faultStream(res, f.id, `Arming ${faultLabel(f.id)}`);
+});
+app.post('/api/faults/disarm', (req, res) => faultStream(res, 'none', 'Disarming the active fault'));
 
 /**
  * Toggling goes through Git, so it takes 30-90s. Streamed as stages rather than
  * left as a dead button: those stages ARE the pipeline the dashboard
  * visualises, so the wait becomes the demonstration instead of dead time.
  */
+// Legacy single-fault toggle, kept for old clients: enabled -> arm F1, else disarm.
 app.post('/api/incident', (req, res) => {
   const enabled = Boolean(req.body?.enabled);
-  const stream = sse(res);
-  stream.send('stage', { stage: 'start', detail: enabled ? 'Triggering incident' : 'Resolving incident' });
-  setIncident(enabled, (stage, detail) => stream.send('stage', { stage, detail }))
-    .then(() => stream.send('done', { enabled }))
-    .catch((err) => stream.send('error', { message: err.message }))
-    .finally(() => stream.end());
+  faultStream(res, enabled ? 'F1' : 'none', enabled ? 'Triggering incident (F1)' : 'Resolving incident');
 });
 
 /** Kira's investigation, streamed live — tool calls arrive before the report. */

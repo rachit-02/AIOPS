@@ -134,7 +134,7 @@ async function healthyRun({ logs = BLIP_LINES, window = [[{ job: 'gateway', stat
 
 test('2: the healthy-system blip -> fixed "No active incident found", lines listed as transient', async () => {
   const { answer, client } = await healthyRun();
-  assert.match(answer, /^### Root cause\nNo active incident found/);
+  assert.match(answer, /^### Root cause\n\*\*Category:\*\* none\nNo active incident found/);
   assert.match(answer, /transient, likely during a rollout at \d\d:\d\d:\d\d UTC/);
   assert.match(answer, /of order \(new pod started \d\d:\d\d:\d\d UTC\)/);
   assert.match(answer, /gateway: `upstream_error` "connect ETIMEDOUT order \(ClusterIP 10\.96\.53\.99:3000\)" \(upstream http:\/\/order:3000\)/);

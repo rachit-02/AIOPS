@@ -174,7 +174,7 @@ test('3: three empty model replies return a marked evidence digest instead of th
   ]);
   const { answer } = await investigate('checkout failing', { verbose: false, client, runTool: fakeTools });
   assert.match(answer, /^\*\*Investigation aborted: the model returned empty responses three turns running\*\*/);
-  assert.match(answer, /### Root cause\nNot determined/);
+  assert.match(answer, /### Root cause\n\*\*Category:\*\* unknown\nNot determined/);
   assert.match(answer, /error lines for order/);
 });
 

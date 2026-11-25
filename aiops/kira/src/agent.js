@@ -95,7 +95,7 @@ const NEGATION = /\b(not|unaffected|no errors?|0 errors|zero errors|healthy|unch
  * services were measured, and which of them showed errors (a non-zero 5xx
  * rate, 5xx counted in the window, or 5xx on a pod only minutes old).
  */
-export function errorEvidence(metricsResults, logsResults = []) {
+export function errorEvidence(metricsResults, logsResults = [], healthResults = []) {
   const seen = new Set();
   const erroring = new Set();
   for (const r of metricsResults) {
@@ -116,9 +116,33 @@ export function errorEvidence(metricsResults, logsResults = []) {
   // service can have error lines while fetch_metrics still shows 0 5xx; it
   // must not be dropped from the blast radius for that.
   for (const svc of servicesWithErrorLogs(logsResults)) erroring.add(svc);
+  // Not every fault is a 5xx. A service that is SLOW (latency anomaly) or has
+  // a pod that cannot run (CrashLoopBackOff, OOMKilled, ImagePullBackOff,
+  // not Ready) is affected too, and must not be removed from the blast radius
+  // for having zero errors.
+  for (const r of metricsResults) for (const x of r?.summary?.latency_anomalies ?? []) erroring.add(x.service);
+  for (const svc of servicesWithHealthProblems(healthResults)) erroring.add(svc);
   const zeroErrors = [...seen].filter((s) => !erroring.has(s));
   return { erroring, zeroErrors };
 }
+
+/** Services with an unhealthy pod or an unfinished rollout, per fetch_health. */
+export function servicesWithHealthProblems(healthResults) {
+  const out = new Set();
+  for (const r of healthResults) {
+    for (const u of r?.summary?.unhealthy ?? []) if (u.service) out.add(u.service);
+    for (const d of r?.summary?.rollouts_not_complete ?? []) if (d.deployment) out.add(d.deployment);
+  }
+  return out;
+}
+
+/** True when fetch_health shows any unhealthy pod, recent restart or unfinished rollout. */
+const healthClean = (r) => {
+  const s = r?.summary ?? {};
+  return s.total_pods > 0 && s.ready_pods === s.total_pods && (s.recent_restarts ?? 0) === 0
+    && (s.unhealthy ?? []).length === 0 && (s.rollouts_not_complete ?? []).length === 0;
+};
+const noLatencyAnomaly = (metrics) => metrics.every((r) => (r?.summary?.latency_anomalies ?? []).length === 0);
 
 /**
  * Services that fetch_logs found error-level lines (or exceptions) for.
@@ -178,8 +202,8 @@ export function metricsLagNote(metricsResults, logsResults) {
  *
  * @returns {{ answer: string, removed: string[] }}
  */
-export function enforceBlastRadius(answer, metricsResults, logsResults = []) {
-  const { erroring, zeroErrors } = errorEvidence(metricsResults, logsResults);
+export function enforceBlastRadius(answer, metricsResults, logsResults = [], healthResults = []) {
+  const { erroring, zeroErrors } = errorEvidence(metricsResults, logsResults, healthResults);
   if (!zeroErrors.length) return { answer, removed: [] };
 
   const lines = answer.split('\n');
@@ -246,7 +270,9 @@ export function noIncidentEvidence({ metrics, logs, health }) {
   const m = metrics.length > 0
     && metrics.every((r) => (r.summary?.services_with_errors ?? []).length === 0
       && (r.services ?? []).every((s) => !(s.error_rate_percent > 0)))
-    && metrics.some((r) => (r.services ?? []).some((s) => s.scrape_up));
+    && metrics.some((r) => (r.services ?? []).some((s) => s.scrape_up))
+    // slow-but-not-failing is a fault (F2): never "no incident"
+    && noLatencyAnomaly(metrics);
   const errorLogs = logs.filter((r) => r.level_filter === 'error');
   // ANY error evidence in ANY log result vetoes the guard - including a
   // per-service query that found errors after an "all" query found none
@@ -255,10 +281,7 @@ export function noIncidentEvidence({ metrics, logs, health }) {
     (r) => (r.exception_count ?? 0) > 0 || (r.level_filter === 'error' && (r.total_matching_lines ?? 0) > 0),
   );
   const l = !anyErrorLines && errorLogs.length > 0 && errorLogs.every((r) => (r.total_matching_lines ?? 0) === 0);
-  const h = health.length > 0 && health.every((r) => {
-    const s = r.summary ?? {};
-    return s.total_pods > 0 && s.ready_pods === s.total_pods && (s.recent_restarts ?? 0) === 0;
-  });
+  const h = health.length > 0 && health.every(healthClean);
   return m && l && h;
 }
 
@@ -272,6 +295,7 @@ export function noIncidentAnswer({ metrics, logs, health }) {
 
   return [
     '### Root cause',
+    '**Category:** none',
     'No active incident found. None of the three signals shows a server-side failure right now.',
     '',
     '### Evidence',
@@ -329,11 +353,8 @@ const hhmmss = (iso) => (iso ? `${String(iso).slice(11, 19)} UTC` : 'an unknown 
 export function weakSignalEvidence({ metrics, logs, health }) {
   if (!metrics.length || !health.length || !logs.some((r) => r.level_filter === 'error')) return null;
 
-  const healthy = health.every((r) => {
-    const s = r.summary ?? {};
-    return s.total_pods > 0 && s.ready_pods === s.total_pods && (s.recent_restarts ?? 0) === 0;
-  });
-  if (!healthy) return null;
+  if (!health.every(healthClean)) return null;
+  if (!noLatencyAnomaly(metrics)) return null;
 
   const services = metrics.flatMap((r) => r.services ?? []);
   if (!services.some((s) => s.scrape_up)) return null;
@@ -392,6 +413,7 @@ export function weakSignalAnswer(evidence, { minor, window5xx }) {
 
   return [
     '### Root cause',
+    '**Category:** none',
     'No active incident found. The only errors are a few transient log lines with no exception and no ' +
       `ongoing 5xx - likely during a rollout at ${hhmmss(first)}${rollout ? `, of ${rollout}` : ''}.`,
     '',
@@ -436,13 +458,14 @@ export const PARTIAL_MARK = '**Partial investigation (turn limit reached)**';
 
 /** A deterministic five-heading answer from the evidence, if the model gives nothing. */
 export function evidenceDigest({ metrics, logs, health }) {
-  const { erroring } = errorEvidence(metrics);
+  const { erroring } = errorEvidence(metrics, [], health);
   const withLogs = [...servicesWithErrorLogs(logs)];
   const topLog = logs.flatMap((r) => r?.messages ?? []).sort((a, b) => (b.has_stack_trace - a.has_stack_trace) || (b.count - a.count))[0];
   const hs = health.at(-1)?.summary;
   const affected = [...new Set([...erroring, ...withLogs])];
   return [
     '### Root cause',
+    '**Category:** unknown',
     'Not determined - the model did not write a conclusion. The evidence gathered so far is below.',
     '',
     '### Evidence',
@@ -703,7 +726,7 @@ ${lag}` : '');
 
   // Evidence check: nothing with zero errors in fetch_metrics stays in the
   // blast radius. See enforceBlastRadius().
-  answer = enforceBlastRadius(answer, metricsResults, logsResults).answer;
+  answer = enforceBlastRadius(answer, metricsResults, logsResults, healthResults).answer;
 
   const summary = trace.finish(answer);
   onEvent({ type: 'answer', answer, ...summary });

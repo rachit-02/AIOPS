@@ -23,6 +23,10 @@ async function instant(expr) {
   return (body.data.result || []).map((r) => ({ labels: r.metric, value: Number(r.value[1]) }));
 }
 
+/** A service is "slow" at p50 >= 800 ms or p95 >= 2 s (see latency_anomalies). */
+export const LATENCY_P50_S = 0.8;
+export const LATENCY_P95_S = 2;
+
 const round = (n, dp = 2) => (Number.isFinite(n) ? Number(n.toFixed(dp)) : null);
 
 export const definition = {
@@ -159,6 +163,19 @@ export async function run({ service, time_range = '15m' }) {
       (s.server_errors_5xx_since_this_pod_started ?? 0) > 0,
   );
   const freshPods = services.filter((s) => s.pod_started_recently);
+  // SLOW without failing (5xx-free latency faults). Thresholds sit far above
+  // normal: p50 is single-digit ms for most services and ~375 ms for
+  // bcrypt-bound auth. Exported thresholds keep the guard and the dashboard in
+  // step with this definition.
+  const slow = services
+    .filter((s) => (s.latency_seconds.p50 ?? 0) >= LATENCY_P50_S || (s.latency_seconds.p95 ?? 0) >= LATENCY_P95_S)
+    .map((s) => ({
+      service: s.service,
+      p50_ms: Math.round((s.latency_seconds.p50 ?? 0) * 1000),
+      p95_ms: Math.round((s.latency_seconds.p95 ?? 0) * 1000),
+      p99_ms: Math.round((s.latency_seconds.p99 ?? 0) * 1000),
+    }))
+    .sort((a, b) => b.p50_ms - a.p50_ms);
   const with4xx = services.filter((s) => s.client_errors_4xx_in_window.approx_total > 0);
 
   return {
@@ -182,6 +199,12 @@ export async function run({ service, time_range = '15m' }) {
         ? `${freshPods.map((s) => `${s.service} (${s.youngest_pod_age_seconds}s)`).join(', ')} started recently: ` +
           'its counters reset and rate windows need a few scrapes, so 5xx figures for it may LAG reality by a ' +
           'minute or two. If fetch_logs shows errors for it, trust the logs - do not conclude "no errors".'
+        : null,
+      latency_anomalies: slow,
+      latency_note: slow.length
+        ? 'Latency propagates UPSTREAM exactly like errors: a slow product makes order, gateway and frontend ' +
+          'slow too. The origin is the DEEPEST slow service in the call graph (product/auth/user/orders below ' +
+          'order, below gateway, below frontend), not the slowest number.'
         : null,
       client_errors_4xx_in_window: Object.fromEntries(
         with4xx.map((s) => [s.service, s.client_errors_4xx_in_window.approx_total]),

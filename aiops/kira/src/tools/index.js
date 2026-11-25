@@ -36,9 +36,11 @@ export function summarise(name, r) {
       const errs = r.summary.services_with_errors;
       const c4 = Object.entries(r.summary.client_errors_4xx_in_window ?? {});
       const client = c4.length ? `; 4xx client responses: ${c4.map(([s, n]) => `${s} ${n}`).join(', ')}` : '';
+      const slow = (r.summary.latency_anomalies ?? []).map((x) => `${x.service} p50 ${x.p50_ms}ms`);
+      const slowText = slow.length ? `; SLOW: ${slow.join(', ')}` : '';
       return errs.length
-        ? `${r.services.length} services; 5xx on ${errs.join(', ')} (worst: ${r.summary.highest_error_rate})${client}`
-        : `${r.services.length} services, no 5xx${client}`;
+        ? `${r.services.length} services; 5xx on ${errs.join(', ')} (worst: ${r.summary.highest_error_rate})${slowText}${client}`
+        : `${r.services.length} services, no 5xx${slowText}${client}`;
     }
     if (name === 'fetch_logs') {
       return r.total_matching_lines === 0
@@ -47,7 +49,9 @@ export function summarise(name, r) {
     }
     if (name === 'fetch_health') {
       const s = r.summary;
-      return `${s.ready_pods}/${s.total_pods} pods ready, ${s.total_restarts} restarts (${s.recent_restarts ?? 0} recent)`;
+      const probs = (s.unhealthy ?? []).map((u) => `${u.service ?? u.name}: ${u.problem}`);
+      return `${s.ready_pods}/${s.total_pods} pods ready, ${s.total_restarts} restarts (${s.recent_restarts ?? 0} recent)` +
+        (probs.length ? `; ${probs.join('; ')}` : '');
     }
   } catch {
     /* fall through */

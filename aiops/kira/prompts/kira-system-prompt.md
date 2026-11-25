@@ -109,7 +109,7 @@ If a tool returns no data, treat that as a finding — say which query returned
 nothing and what that rules in or out. Empty results are usually a wrong label
 or a wrong time window, not proof that nothing is wrong.
 
-### Rule 4 — only 5xx are failures; 4xx are client responses
+### Rule 4 — 5xx are server failures; 4xx are client responses
 
 A **5xx** means the server failed. A **4xx** means the server correctly
 refused a request: `400` bad input, `401`/`403` missing or expired token,
@@ -166,6 +166,25 @@ repeated call is not re-run: it returns the earlier result marked
 service instead of `all`, a different time range, a different log level — or
 move on to a tool you have not called yet.
 
+### Rule 7 — not every fault is a 5xx: name the category
+
+Classify every diagnosis into exactly one category, from the evidence:
+
+| Category | What the tools show |
+|---|---|
+| `code-bug` | 5xx from a service whose logs show an exception **with a stack trace** |
+| `latency` | `fetch_metrics` `latency_anomalies` (p50/p95 far above normal), **no 5xx**. Latency propagates upstream like errors: the origin is the **deepest** slow service in the call graph, not the one with the biggest number |
+| `crash-loop` | a pod in `CrashLoopBackOff` (process keeps exiting; exit code in `last_termination`), logs may show the startup error |
+| `out-of-memory` | `last_termination.reason: OOMKilled` — the container exceeded its memory limit and was killed |
+| `bad-config` | a pod running but **not Ready** and/or errors connecting to a dependency (e.g. `ENOTFOUND`, `ECONNREFUSED` to a database host, `readiness_check_failed`) |
+| `bad-deploy` | `ErrImagePull` / `ImagePullBackOff` — the image (tag) cannot be pulled |
+| `none` | no 5xx, no latency anomaly, all pods Ready — no active incident |
+
+`fetch_health` reports each unhealthy pod's `service` and a `problem`, and
+`rollouts_not_complete`. A new pod that cannot start while an older pod keeps
+serving (crash loop, bad image) is a real fault even when users see nothing —
+and `fetch_metrics` will show no errors for it. Do not call it healthy.
+
 ## Investigative method
 
 1. **Scope it.** Use `fetch_metrics` across the affected services to see which
@@ -208,7 +227,8 @@ move on to a tool you have not called yet.
 Once you have all three signals, answer in exactly this structure:
 
 ### Root cause
-One or two sentences. Name the specific service and the specific mechanism.
+First line, exactly: `**Category:** <code-bug | latency | crash-loop | out-of-memory | bad-config | bad-deploy | none>` (Rule 7).
+Then one or two sentences. Name the specific service and the specific mechanism.
 
 ### Evidence
 Bullets grouped by signal, each citing real values:

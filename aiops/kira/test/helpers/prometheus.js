@@ -21,6 +21,7 @@ export const restore = () => { globalThis.fetch = realFetch; };
  * @param {Array}    [o.window]           [[{job,status}, count]] increase() over the window, 4xx/5xx
  * @param {Array}    [o.routes]           [[{job,route,status}, count]] increase() by route, 4xx/5xx
  * @param {object}   [o.raw5xx]           { job: count } raw 5xx counter (read only for fresh pods)
+ * @param {object}   [o.latency]          { job: { p50, p95, p99 } } in SECONDS (default: none)
  */
 export function stubPrometheus({
   jobs = ['gateway', 'frontend', 'order', 'orders'],
@@ -30,14 +31,19 @@ export function stubPrometheus({
   window = [],
   routes = [],
   raw5xx = {},
+  latency = {},
 } = {}) {
   const perJob = (obj, dflt) => jobs.filter((j) => (obj[j] ?? dflt) !== undefined).map((job) => [{ job }, obj[job] ?? dflt]);
+  const quantile = (expr) => (expr.includes('(0.50,') ? 'p50' : expr.includes('(0.95,') ? 'p95' : 'p99');
   globalThis.fetch = async (url) => {
     const expr = new URL(url).searchParams.get('query');
     let body;
     if (expr.startsWith('up{')) body = vec(jobs.map((job) => [{ job }, 1]));
     else if (expr.startsWith('time() - max by (job) (process_start_time_seconds')) body = vec(perJob(podAge, 3600));
-    else if (expr.includes('histogram_quantile')) body = vec([]);
+    else if (expr.includes('histogram_quantile')) {
+      const q = quantile(expr);
+      body = vec(Object.entries(latency).map(([job, l]) => [{ job }, l[q]]));
+    }
     else if (expr.startsWith('sum by (job,route,status) (increase(')) body = vec(routes);
     else if (expr.startsWith('sum by (job,status) (increase(')) body = vec(window);
     else if (expr.startsWith('sum by (job) (http_requests_total{')) body = vec(Object.entries(raw5xx).map(([job, v]) => [{ job }, v]));

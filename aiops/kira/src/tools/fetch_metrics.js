@@ -70,32 +70,32 @@ export async function run({ service, time_range = '15m' }) {
   // 5xx figure below.
   const win = `${Math.max(60, seconds)}s`;
 
-  const [rate, errRate, p50, p95, p99, byStatus, byRoute, up, err5xxWindow, podAge] = await Promise.all([
+  // EVERY count the model sees is WITHIN THE WINDOW. Lifetime counters
+  // ("since pod start") were read by a 7B model as current: with the system
+  // healthy it cited "order 106 errors since pod start" - left over from a
+  // fault disarmed 15 minutes earlier - as an ongoing failure.
+  //
+  // Window counts use increase(), computed per series and summed, so they
+  // handle counter resets and include old AND new pods across a restart
+  // (arming or disarming the seeded fault restarts the order pod). increase()
+  // extrapolates at the window edges, so counts are labelled approximate;
+  // they answer "were there 5xx, roughly how many", not an exact tally.
+  const [rate, errRate, p50, p95, p99, up, podAge, statusWindow, routeWindow, raw5xx] = await Promise.all([
     instant(`sum by (job) (rate(http_requests_total{${sel}}[${w}]))`),
     instant(`sum by (job) (rate(http_requests_total{${sel},status=~"5.."}[${w}]))`),
     instant(`histogram_quantile(0.50, sum by (le,job) (rate(http_request_duration_seconds_bucket{${sel}}[${w}])))`),
     instant(`histogram_quantile(0.95, sum by (le,job) (rate(http_request_duration_seconds_bucket{${sel}}[${w}])))`),
     instant(`histogram_quantile(0.99, sum by (le,job) (rate(http_request_duration_seconds_bucket{${sel}}[${w}])))`),
-    // RAW counter totals, not increase(). increase() extrapolates at the window
-    // edges and is badly distorted when a counter was born mid-window - which
-    // happens on every deploy, i.e. exactly when incidents start. Measured
-    // against a real incident, increase() reported 15 / 7 / 2 errors for three
-    // services that had each seen the same 14. Raw totals since pod start are
-    // exact, and after a rollout they are scoped to the incident anyway.
-    instant(`sum by (job,status) (http_requests_total{${sel}})`),
-    instant(`sum by (job,route,status) (http_requests_total{${sel},status=~"[45].."})`),
     instant(`up{${sel}}`),
-    // 5xx WITHIN THE WINDOW, summed across every pod series that existed in
-    // it. increase() is computed per series and handles counter resets, so an
-    // old pod's errors and a new pod's errors both count - unlike the raw
-    // totals above, which restart from zero with the pod. Arming the seeded
-    // fault RESTARTS the order pod, which is exactly when "since pod start"
-    // is least informative. Approximate (increase() extrapolates at the window
-    // edges), so it is used to answer "were there 5xx?", not "exactly how many".
-    instant(`sum by (job,status) (increase(http_requests_total{${sel},status=~"5.."}[${win}]))`),
     // Age of the youngest pod per service. A pod a minute old has reset
     // counters and fewer than a handful of scrapes, so every rate is unreliable.
     instant(`time() - max by (job) (process_start_time_seconds{${sel}})`),
+    instant(`sum by (job,status) (increase(http_requests_total{${sel},status=~"[45].."}[${win}]))`),
+    instant(`sum by (job,route,status) (increase(http_requests_total{${sel},status=~"[45].."}[${win}]))`),
+    // Raw 5xx counter. Used ONLY for a pod younger than FRESH_POD_SECONDS,
+    // where "since this pod started" is itself recent and rate() has not
+    // caught up yet. Never reported for an older pod.
+    instant(`sum by (job) (http_requests_total{${sel},status=~"5.."})`),
   ]);
 
   const pick = (arr, job) => arr.find((r) => r.labels.job === job)?.value;
@@ -114,23 +114,21 @@ export async function run({ service, time_range = '15m' }) {
   const services = jobs.map((job) => {
     const rps = pick(rate, job) ?? 0;
     const eps = pick(errRate, job) ?? 0;
-    const statuses = byStatus
+    const statuses = statusWindow
       .filter((r) => r.labels.job === job && r.value >= 0.5)
       .map((r) => ({ status: r.labels.status, count: Math.round(r.value) }))
       .sort((a, b) => b.count - a.count);
     // Only failing routes: a list of every healthy route is noise that buries
     // the one that matters.
-    const routes = byRoute
+    const routes = routeWindow
       .filter((r) => r.labels.job === job && r.value >= 0.5)
-      .map((r) => ({ route: r.labels.route, status: r.labels.status, count: Math.round(r.value) }))
-      .sort((a, b) => b.count - a.count);
+      .map((r) => ({ route: r.labels.route, status: r.labels.status, approx_count: Math.round(r.value) }))
+      .sort((a, b) => b.approx_count - a.approx_count);
     const server = statuses.filter((s) => is5xx(s.status));
     const client = statuses.filter((s) => is4xx(s.status));
-    const windowed = err5xxWindow
-      .filter((r) => r.labels.job === job && is5xx(r.labels.status) && r.value >= 0.5)
-      .map((r) => ({ status: r.labels.status, count: Math.round(r.value) }));
     const age = pick(podAge, job);
     const fresh = Number.isFinite(age) && age < FRESH_POD_SECONDS;
+    const fresh5xx = fresh ? Math.round(pick(raw5xx, job) ?? 0) : 0;
 
     return {
       service: job,
@@ -140,37 +138,36 @@ export async function run({ service, time_range = '15m' }) {
       // 0/0 -> NaN on an idle service.
       error_rate_percent: rps > 0 ? round((eps / rps) * 100) : 0,
       latency_seconds: { p50: round(pick(p50, job), 4), p95: round(pick(p95, job), 4), p99: round(pick(p99, job), 4) },
-      // 5xx in the whole query window across old AND new pods - survives a
-      // pod restart. Approximate; see the query above.
-      server_errors_5xx_in_window: { approx_total: sum(windowed), by_status: windowed },
+      server_errors_5xx_in_window: { approx_total: sum(server), by_status: server },
+      client_errors_4xx_in_window: { approx_total: sum(client), by_status: client },
       youngest_pod_age_seconds: Number.isFinite(age) ? Math.round(age) : null,
       pod_started_recently: fresh,
-      // All counts below are "since the pod started", NOT "within the query
-      // window". Named explicitly so they are not misread as windowed counts.
-      server_errors_5xx_since_pod_start: { total: sum(server), by_status: server },
-      client_errors_4xx_since_pod_start: { total: sum(client), by_status: client },
-      other_responses_since_pod_start: statuses.filter((s) => !is5xx(s.status) && !is4xx(s.status)),
-      // SERVER failures only (5xx). The dashboard reads this field too.
+      // Only for a pod a few minutes old, where it is current by definition.
+      ...(fresh ? { server_errors_5xx_since_this_pod_started: fresh5xx } : {}),
+      // SERVER failures only (5xx), in the window. The dashboard reads this.
       failing_routes: routes.filter((r) => is5xx(r.status)).slice(0, 10),
       client_error_routes_4xx: routes.filter((r) => is4xx(r.status)).slice(0, 10),
     };
   });
 
-  // Erroring = any 5xx evidence: a non-zero windowed rate, 5xx counted in the
+  // Erroring = 5xx evidence NOW: a non-zero windowed rate, 5xx counted in the
   // window across pod restarts, or 5xx on a pod too young for rate() to show.
   const erroring = services.filter(
     (s) =>
       s.error_rate_percent > 0 ||
       s.server_errors_5xx_in_window.approx_total > 0 ||
-      (s.pod_started_recently && s.server_errors_5xx_since_pod_start.total > 0),
+      (s.server_errors_5xx_since_this_pod_started ?? 0) > 0,
   );
   const freshPods = services.filter((s) => s.pod_started_recently);
-  const with4xx = services.filter((s) => s.client_errors_4xx_since_pod_start.total > 0);
+  const with4xx = services.filter((s) => s.client_errors_4xx_in_window.approx_total > 0);
 
   return {
     source: 'prometheus',
     query_window: time_range,
     namespace: config.namespace,
+    counts_note:
+      `All counts are approximate totals WITHIN the last ${time_range}, summed across pod restarts. ` +
+      'No lifetime / since-pod-start totals are reported.',
     services,
     summary: {
       // Server errors (5xx) in the query window. This - not 4xx - is what
@@ -186,8 +183,8 @@ export async function run({ service, time_range = '15m' }) {
           'its counters reset and rate windows need a few scrapes, so 5xx figures for it may LAG reality by a ' +
           'minute or two. If fetch_logs shows errors for it, trust the logs - do not conclude "no errors".'
         : null,
-      client_errors_4xx_since_pod_start: Object.fromEntries(
-        with4xx.map((s) => [s.service, s.client_errors_4xx_since_pod_start.total]),
+      client_errors_4xx_in_window: Object.fromEntries(
+        with4xx.map((s) => [s.service, s.client_errors_4xx_in_window.approx_total]),
       ),
       client_errors_note:
         '4xx are CLIENT responses (400 validation, 401/403 missing or expired token, 404 not found, ' +
@@ -197,11 +194,11 @@ export async function run({ service, time_range = '15m' }) {
       // Deliberately phrased as a HINT, not a conclusion. The tool reports the
       // service with the most 5xx; deciding whether that is the origin or just
       // the busiest propagator is the model's job, using the call graph.
-      highest_error_rate: erroring.sort((a, b) => b.error_rate_percent - a.error_rate_percent)[0]?.service ?? null,
+      highest_error_rate: [...erroring].sort((a, b) => b.error_rate_percent - a.error_rate_percent)[0]?.service ?? null,
       note:
         erroring.length > 1
           ? 'Multiple services are erroring. Errors propagate upstream (frontend <- gateway <- backend), ' +
-            'so compare absolute 5xx counts and the call graph before naming an origin.'
+            'so use the call graph and which service THREW (fetch_logs) before naming an origin.'
           : null,
     },
   };

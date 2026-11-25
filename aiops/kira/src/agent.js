@@ -93,18 +93,22 @@ const NEGATION = /\b(not|unaffected|no errors?|0 errors|zero errors|healthy|unch
 /**
  * From every successful fetch_metrics result in the investigation: which
  * services were measured, and which of them showed errors (a non-zero 5xx
- * rate, or any 5xx since pod start).
+ * rate, 5xx counted in the window, or 5xx on a pod only minutes old).
  */
 export function errorEvidence(metricsResults, logsResults = []) {
   const seen = new Set();
   const erroring = new Set();
   for (const r of metricsResults) {
+    const flagged = new Set(r?.summary?.services_with_errors ?? []);
     for (const s of r?.services ?? []) {
       seen.add(s.service);
+      // CURRENT evidence only: the window, or a pod young enough that "since
+      // it started" is itself recent. Lifetime counts never make a service
+      // "erroring" - that is how a disarmed fault got reported as live.
       const fiveXX =
+        flagged.has(s.service) ||
         (s.server_errors_5xx_in_window?.approx_total ?? 0) > 0 ||
-        (s.server_errors_5xx_since_pod_start?.total ?? 0) > 0 ||
-        (s.status_counts_since_pod_start ?? []).some((c) => String(c.status).startsWith('5') && c.count > 0);
+        (s.server_errors_5xx_since_this_pod_started ?? 0) > 0;
       if (s.error_rate_percent > 0 || fiveXX) erroring.add(s.service);
     }
   }
@@ -262,7 +266,7 @@ export function noIncidentEvidence({ metrics, logs, health }) {
 export function noIncidentAnswer({ metrics, logs, health }) {
   const lastMetrics = metrics.at(-1);
   const measured = (lastMetrics?.services ?? []).map((s) => s.service);
-  const client4xx = Object.entries(lastMetrics?.summary?.client_errors_4xx_since_pod_start ?? {});
+  const client4xx = Object.entries(lastMetrics?.summary?.client_errors_4xx_in_window ?? {});
   const logServices = [...new Set(logs.filter((r) => r.level_filter === 'error').map((r) => r.service))];
   const hs = health.at(-1)?.summary ?? {};
 
@@ -274,7 +278,7 @@ export function noIncidentAnswer({ metrics, logs, health }) {
     `- **Metrics:** ${measured.length} services measured (${measured.join(', ')}) over ${lastMetrics?.query_window ?? 'the window'}; ` +
       'no 5xx server errors on any service.' +
       (client4xx.length
-        ? ` 4xx client responses since pod start (${client4xx.map(([s, n]) => `${s} ${n}`).join(', ')}) are ` +
+        ? ` 4xx client responses in the window (${client4xx.map(([s, n]) => `${s} ${n}`).join(', ')}) are ` +
           'requests the server correctly refused - not a failure.'
         : ''),
     `- **Logs:** no error-level lines for ${logServices.join(', ') || 'the services queried'}.`,
@@ -294,6 +298,134 @@ export function noIncidentAnswer({ metrics, logs, health }) {
     'Nothing to prevent. _This answer comes from Kira\'s no-incident guard, built directly from the tool ' +
       'results above; the model\'s own conclusion was not used because the evidence contains no failure._',
   ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Weak-signal path: a transient blip is not an incident
+// ---------------------------------------------------------------------------
+
+/** At most this many distinct error log lines still count as a blip. */
+export const WEAK_LOG_LINES = 5;
+/** Statuses a proxy returns when an upstream briefly cannot be reached. */
+const PROXY_5XX = new Set(['502', '503', '504']);
+
+const hhmmss = (iso) => (iso ? `${String(iso).slice(11, 19)} UTC` : 'an unknown time');
+
+/**
+ * Observed with the system healthy, 15 minutes after the fault was disarmed:
+ * no current 5xx, pods healthy, and ONE gateway `upstream_error` (connect
+ * ETIMEDOUT to the order Service while its pod was being replaced). The model
+ * turned that into "product database connection timeout". A blip that small,
+ * with no exception anywhere, is answered from the evidence instead.
+ *
+ * Returns the minor lines when ALL of these hold, otherwise null:
+ *  - every pod Ready, no restart in the last 10 minutes;
+ *  - no service has a current 5xx rate (error_rate_percent == 0);
+ *  - any 5xx counted in the window are proxy statuses (502/503/504), at most
+ *    WEAK_LOG_LINES per service, and explained by `upstream_error` log lines;
+ *  - error-level logs were fetched, hold 1..WEAK_LOG_LINES distinct lines,
+ *    and NO log result has an exception or stack trace.
+ */
+export function weakSignalEvidence({ metrics, logs, health }) {
+  if (!metrics.length || !health.length || !logs.some((r) => r.level_filter === 'error')) return null;
+
+  const healthy = health.every((r) => {
+    const s = r.summary ?? {};
+    return s.total_pods > 0 && s.ready_pods === s.total_pods && (s.recent_restarts ?? 0) === 0;
+  });
+  if (!healthy) return null;
+
+  const services = metrics.flatMap((r) => r.services ?? []);
+  if (!services.some((s) => s.scrape_up)) return null;
+  if (services.some((s) => s.error_rate_percent > 0)) return null;
+  if (services.some((s) => (s.server_errors_5xx_since_this_pod_started ?? 0) > 0)) return null;
+  const window5xx = services.flatMap((s) =>
+    (s.server_errors_5xx_in_window?.by_status ?? []).map((b) => ({ service: s.service, ...b })),
+  );
+  if (window5xx.some((b) => !PROXY_5XX.has(String(b.status)))) return null;
+  for (const s of services) if ((s.server_errors_5xx_in_window?.approx_total ?? 0) > WEAK_LOG_LINES) return null;
+
+  // Any exception anywhere -> real failure in code -> the model's job.
+  if (logs.some((r) => (r.exception_count ?? 0) > 0 || (r.messages ?? []).some((m) => m.has_stack_trace))) return null;
+
+  // Distinct error lines across all log results ("all" and per-service calls
+  // overlap, so de-duplicate rather than add).
+  const lines = new Map();
+  for (const r of logs.filter((x) => x.level_filter === 'error')) {
+    for (const m of r.messages ?? []) {
+      const key = `${m.event}|${m.message}|${m.first_seen}`;
+      if (!lines.has(key)) lines.set(key, { ...m, services: m.services ?? (r.service && r.service !== 'all' ? [r.service] : []) });
+    }
+  }
+  const minor = [...lines.values()];
+  const count = minor.reduce((n, m) => n + (m.count ?? 1), 0);
+  if (count === 0 || count > WEAK_LOG_LINES) return null;
+  if (window5xx.length && !minor.some((m) => m.event === 'upstream_error')) return null;
+
+  return { minor, window5xx };
+}
+
+/** Fixed answer for the weak-signal path, same five headings. */
+export function weakSignalAnswer(evidence, { minor, window5xx }) {
+  const lastMetrics = evidence.metrics.at(-1);
+  const now = Date.now();
+  // Pod start times from fetch_metrics, to name the rollout a blip fell in.
+  const podStarts = (lastMetrics?.services ?? [])
+    .filter((s) => Number.isFinite(s.youngest_pod_age_seconds))
+    .map((s) => ({ service: s.service, startedMs: now - s.youngest_pod_age_seconds * 1000 }));
+  const rolloutFor = (iso) => {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return null;
+    // A pod that started up to 10 minutes before the line, or just after it.
+    const hit = podStarts.find((p) => p.startedMs <= t + 60_000 && t - p.startedMs <= 10 * 60_000);
+    return hit ? `${hit.service} (new pod started ${hhmmss(new Date(hit.startedMs).toISOString())})` : null;
+  };
+
+  const first = minor.map((m) => m.first_seen).filter(Boolean).sort()[0];
+  const rollout = first ? rolloutFor(first) : null;
+  const hs = evidence.health.at(-1)?.summary ?? {};
+  const logLines = minor.map((m) => {
+    const who = m.services?.length ? `${m.services.join(', ')}: ` : '';
+    const upstream = m.example?.upstream ? ` (upstream ${m.example.upstream})` : '';
+    return `  - ${hhmmss(m.first_seen)} — ${who}\`${m.event}\` "${m.message}"${upstream} ×${m.count ?? 1}`;
+  });
+
+  return [
+    '### Root cause',
+    'No active incident found. The only errors are a few transient log lines with no exception and no ' +
+      `ongoing 5xx - likely during a rollout at ${hhmmss(first)}${rollout ? `, of ${rollout}` : ''}.`,
+    '',
+    '### Evidence',
+    `- **Metrics:** no service has a current 5xx rate over ${lastMetrics?.query_window ?? 'the window'}.` +
+      (window5xx.length
+        ? ` The window holds ${window5xx.map((b) => `${b.service} ${b.status} ×${b.count}`).join(', ')} - ` +
+          'proxy responses matching the transient lines below, not an ongoing failure.'
+        : ' No 5xx in the window.'),
+    '- **Logs:** only minor, transient error lines (no exception, no stack trace) - transient, likely during a ' +
+      `rollout at ${hhmmss(first)}:`,
+    ...logLines,
+    `- **Health:** ${hs.ready_pods}/${hs.total_pods} pods ready, no restarts in the last 10 minutes.`,
+    '',
+    '### Blast radius',
+    '**Affected services:** none currently. The lines above did not recur.',
+    '',
+    '### Recommended fix',
+    'No fix needed. If you just armed a fault, ArgoCD needs ~2–3 minutes to roll out; try again shortly. ' +
+      'If these lines keep recurring, investigate the upstream they name.',
+    '',
+    '### Prevention',
+    'Optional: a preStop delay / readiness gate on rolling updates removes connection errors while a pod is ' +
+      'replaced. _This answer comes from Kira\'s weak-signal guard, built from the tool results above; the ' +
+      'model\'s own conclusion was not used._',
+  ].join('\n');
+}
+
+/** Clean signals or a transient blip -> a fixed answer; otherwise null (the model decides). */
+export function quietAnswer(evidence) {
+  if (noIncidentEvidence(evidence)) return { kind: 'clean', answer: noIncidentAnswer(evidence) };
+  const weak = weakSignalEvidence(evidence);
+  if (weak) return { kind: 'transient', answer: weakSignalAnswer(evidence, weak) };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -517,9 +649,10 @@ ${lag}` : '');
       // signals say nothing is failing, the model's conclusion is discarded
       // and a fixed, evidence-only answer is returned instead.
       const evidence = { metrics: metricsResults, logs: logsResults, health: healthResults };
-      if (noIncidentEvidence(evidence)) {
-        if (verbose) trace.say('[no-incident guard] all three signals are clean; model conclusion discarded');
-        answer = noIncidentAnswer(evidence);
+      const quiet = quietAnswer(evidence);
+      if (quiet) {
+        if (verbose) trace.say(`[no-incident guard: ${quiet.kind}] model conclusion discarded`);
+        answer = quiet.answer;
       } else {
         answer = res.text;
       }
@@ -557,8 +690,9 @@ ${lag}` : '');
   if (!answer) {
     const missing = REQUIRED_TOOLS.filter((t) => !called.has(t));
     const evidence = { metrics: metricsResults, logs: logsResults, health: healthResults };
-    if (missing.length === 0 && noIncidentEvidence(evidence)) {
-      answer = noIncidentAnswer(evidence);
+    const quiet = missing.length === 0 ? quietAnswer(evidence) : null;
+    if (quiet) {
+      answer = quiet.answer;
     } else {
       answer = await partialDiagnosis({ client, system, messages, trace, missing, evidence, verbose });
     }

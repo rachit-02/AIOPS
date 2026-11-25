@@ -17,53 +17,39 @@ import assert from 'node:assert/strict';
 import { investigate, metricsLagNote, noIncidentEvidence, PARTIAL_MARK } from '../src/agent.js';
 import { run as fetchMetrics } from '../src/tools/fetch_metrics.js';
 import { config } from '../src/config.js';
+import { stubPrometheus, restore } from './helpers/prometheus.js';
 
-const realFetch = globalThis.fetch;
-after(() => { globalThis.fetch = realFetch; });
+after(restore);
 
 /**
- * Prometheus as seen just after the fault was armed: the order pod is
- * `orderAge` seconds old. `window5xx` = what increase() over the window finds.
+ * Prometheus as seen around a fault being armed: the order pod is `orderAge`
+ * seconds old. `window5xx` = what increase() over the window finds;
+ * `raw5xx` = the order pod's raw 5xx counter (only read for a fresh pod).
  */
-function stubPrometheus({ orderAge = 20, rate5xx = 0, window5xx = 0, sincePodStart5xx = 0 } = {}) {
-  const vec = (rows) => ({ status: 'success', data: { resultType: 'vector', result: rows.map(([metric, v]) => ({ metric, value: [0, String(v)] })) } });
-  const jobs = ['gateway', 'frontend', 'order', 'orders'];
-  globalThis.fetch = async (url) => {
-    const expr = new URL(url).searchParams.get('query');
-    let body;
-    if (expr.startsWith('up{')) body = vec(jobs.map((job) => [{ job }, 1]));
-    else if (expr.startsWith('time() - max by (job) (process_start_time_seconds')) {
-      body = vec(jobs.map((job) => [{ job }, job === 'order' ? orderAge : 3600]));
-    } else if (expr.includes('increase(http_requests_total')) {
-      body = vec(window5xx ? [[{ job: 'order', status: '500' }, window5xx]] : []);
-    } else if (expr.includes('histogram_quantile')) body = vec([]);
-    else if (expr.startsWith('sum by (job,route,status)')) {
-      body = vec(sincePodStart5xx ? [[{ job: 'order', route: '/orders', status: '500' }, sincePodStart5xx]] : []);
-    } else if (expr.startsWith('sum by (job,status)')) {
-      body = vec([
-        [{ job: 'gateway', status: '200' }, 500], [{ job: 'order', status: '201' }, 3],
-        ...(sincePodStart5xx ? [[{ job: 'order', status: '500' }, sincePodStart5xx]] : []),
-      ]);
-    } else if (expr.includes('status=~"5.."')) body = vec(rate5xx ? [[{ job: 'order' }, rate5xx]] : []);
-    else body = vec(jobs.map((job) => [{ job }, 1.2]));
-    return new Response(JSON.stringify(body), { status: 200 });
-  };
+function stubArmed({ orderAge = 20, rate5xx = 0, window5xx = 0, raw5xx = 0 } = {}) {
+  stubPrometheus({
+    podAge: { order: orderAge },
+    rate5xx: rate5xx ? { order: rate5xx } : {},
+    window: window5xx ? [[{ job: 'order', status: '500' }, window5xx]] : [],
+    routes: window5xx ? [[{ job: 'order', route: '/orders', status: '500' }, window5xx]] : [],
+    raw5xx: raw5xx ? { order: raw5xx } : {},
+  });
 }
 
 // ---- item 2: metrics across a pod restart --------------------------------
 
-test('2: 5xx counted over the window survive a pod restart (rate and since-pod-start both 0)', async () => {
-  stubPrometheus({ orderAge: 600, rate5xx: 0, sincePodStart5xx: 0, window5xx: 9 });
+test('2: 5xx counted over the window survive a pod restart (current rate 0)', async () => {
+  stubArmed({ orderAge: 600, rate5xx: 0, raw5xx: 0, window5xx: 9 });
   const r = await fetchMetrics({ service: 'all', time_range: '15m' });
   const order = r.services.find((s) => s.service === 'order');
   assert.equal(order.error_rate_percent, 0);
-  assert.equal(order.server_errors_5xx_since_pod_start.total, 0);
+  assert.equal(order.server_errors_5xx_since_this_pod_started, undefined, 'not a fresh pod: no raw counter reported');
   assert.deepEqual(order.server_errors_5xx_in_window, { approx_total: 9, by_status: [{ status: '500', count: 9 }] });
   assert.deepEqual(r.summary.services_with_errors, ['order']);
 });
 
 test('2: a freshly started pod is flagged and the summary warns that metrics may lag', async () => {
-  stubPrometheus({ orderAge: 20 });
+  stubArmed({ orderAge: 20 });
   const r = await fetchMetrics({ service: 'all', time_range: '15m' });
   const order = r.services.find((s) => s.service === 'order');
   assert.equal(order.pod_started_recently, true);
@@ -74,9 +60,10 @@ test('2: a freshly started pod is flagged and the summary warns that metrics may
 });
 
 test('2: a fresh pod with 5xx since start counts as erroring even before rate() catches up', async () => {
-  stubPrometheus({ orderAge: 30, rate5xx: 0, window5xx: 0, sincePodStart5xx: 3 });
+  stubArmed({ orderAge: 30, rate5xx: 0, window5xx: 0, raw5xx: 3 });
   const r = await fetchMetrics({ service: 'all', time_range: '15m' });
   assert.deepEqual(r.summary.services_with_errors, ['order']);
+  assert.equal(r.services.find((x) => x.service === 'order').server_errors_5xx_since_this_pod_started, 3);
 });
 
 test('2: logs with errors + metrics with 0 5xx -> cross-check note, not "no errors"', () => {
@@ -116,7 +103,7 @@ const DIAGNOSIS = [
 ].join('\n');
 
 test('4: guard never fires when a later per-service log call found errors (live sequence)', async () => {
-  stubPrometheus({ orderAge: 20 }); // metrics: 0 5xx, fresh order pod
+  stubArmed({ orderAge: 20 }); // metrics: 0 5xx, fresh order pod
   const runTool = async (name, args) =>
     name === 'fetch_metrics' ? fetchMetrics(args)
       : name === 'fetch_logs' ? (args.service === 'all' ? LOGS_ALL_EMPTY : LOGS_ORDER)

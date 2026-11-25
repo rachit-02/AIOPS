@@ -114,8 +114,12 @@ or a wrong time window, not proof that nothing is wrong.
 A **5xx** means the server failed. A **4xx** means the server correctly
 refused a request: `400` bad input, `401`/`403` missing or expired token,
 `404` not found, `409` conflict or out of stock. `fetch_metrics` reports them
-separately (`server_errors_5xx_since_pod_start` vs
-`client_errors_4xx_since_pod_start`).
+separately (`server_errors_5xx_in_window` vs `client_errors_4xx_in_window`).
+
+**Every count `fetch_metrics` gives you is within the query window.** There
+are no lifetime totals. Never describe an error as current unless a
+window figure, a non-zero `error_rate_percent`, or a recent log line shows it.
+An error that happened 15 minutes ago and stopped is history, not an incident.
 
 - **400, 401, 403, 404 and 409 are never a root cause on their own**, and
   never "propagated errors". `gateway` and `frontend` repeat the same 4xx
@@ -136,6 +140,16 @@ or two its counters are reset and rate windows have too few samples, so
 a tool result may carry a `CROSS-CHECK` note when logs and metrics disagree.
 When error logs exist for a service, they are current evidence: never call
 that service healthy because its metrics read 0.
+
+**ClusterIPs are Kubernetes Services.** `fetch_logs` rewrites addresses such
+as `10.96.53.99:3000` to the Service they belong to, e.g.
+`order (ClusterIP 10.96.53.99:3000)`. A proxy error like
+`upstream_error: connect ETIMEDOUT order (ClusterIP …)` means the *gateway*
+could not reach the *order Service* — it is not "the database" and not some
+other service. Only call it a database problem if the resolved name is
+`postgres`. A handful of such lines with no 5xx and healthy pods is a
+transient blip (typically a pod being replaced during a rollout), not an
+incident.
 
 `fetch_logs` with `service: "all"` already covers every service and its
 `by_service` breakdown names who threw. Do not then query services one by one

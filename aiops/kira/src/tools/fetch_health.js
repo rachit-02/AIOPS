@@ -14,24 +14,10 @@
  * Read-only by construction: this module imports no write methods from the
  * client, so Kira cannot mutate the cluster even if she decided to try.
  */
-import * as k8s from '@kubernetes/client-node';
 import { config } from '../config.js';
-
-let cached = null;
-function clients() {
-  if (cached) return cached;
-  const kc = new k8s.KubeConfig();
-  kc.loadFromDefault();
-  // Pin the context explicitly. Without this, Kira would inspect whatever
-  // cluster kubectl happens to point at - which in the best case is confusing
-  // and in the worst case is someone else's cluster.
-  if (config.kubeContext) kc.setCurrentContext(config.kubeContext);
-  cached = {
-    core: kc.makeApiClient(k8s.CoreV1Api),
-    apps: kc.makeApiClient(k8s.AppsV1Api),
-  };
-  return cached;
-}
+// Shared, context-pinned, read-only client (also used by fetch_logs to
+// resolve ClusterIPs to Service names).
+import { clients } from '../k8s.js';
 
 export const definition = {
   name: 'fetch_health',

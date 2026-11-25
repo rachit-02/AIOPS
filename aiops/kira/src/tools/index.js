@@ -34,7 +34,7 @@ export function summarise(name, r) {
   try {
     if (name === 'fetch_metrics') {
       const errs = r.summary.services_with_errors;
-      const c4 = Object.entries(r.summary.client_errors_4xx_since_pod_start ?? {});
+      const c4 = Object.entries(r.summary.client_errors_4xx_in_window ?? {});
       const client = c4.length ? `; 4xx client responses: ${c4.map(([s, n]) => `${s} ${n}`).join(', ')}` : '';
       return errs.length
         ? `${r.services.length} services; 5xx on ${errs.join(', ')} (worst: ${r.summary.highest_error_rate})${client}`

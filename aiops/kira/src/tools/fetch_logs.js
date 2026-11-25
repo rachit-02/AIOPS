@@ -21,6 +21,7 @@
  *    capped sample with the stack trace attached.
  */
 import { config, parseTimeRange, fetchJson } from '../config.js';
+import { clusterIpMap, resolveClusterIps } from '../k8s.js';
 
 const NS_LABEL = 'kubernetes_namespace_name';
 const CONTAINER_LABEL = 'kubernetes_container_name';
@@ -89,7 +90,10 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
     `?query=${encodeURIComponent(selector + ' | json')}` +
     `&start=${start}&end=${end}&limit=1000&direction=backward`;
 
-  const body = await fetchJson(url, { timeoutMs: 20000 });
+  const [body, ipMap] = await Promise.all([fetchJson(url, { timeoutMs: 20000 }), clusterIpMap()]);
+  // "10.96.53.99:3000" -> "order (ClusterIP 10.96.53.99:3000)". Raw ClusterIPs
+  // were read by the model as "the database"; a name cannot be.
+  const named = (t) => resolveClusterIps(t, ipMap);
   const streams = body?.data?.result || [];
 
   const groups = new Map();
@@ -112,7 +116,16 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
       }
       // Our services log an `err` object for unhandled exceptions; the access
       // log carries `error` for handled failures.
-      const errMsg = line?.err?.message || line.error || line.msg || '(no message)';
+      // The gateway logs proxy failures with `err` as a plain STRING
+      // ("connect ETIMEDOUT 10.96.53.99:3000") plus the `upstream` it tried;
+      // reading only err.message dropped both and left just "upstream_error".
+      const errMsg = named(
+        line?.err?.message ||
+          (typeof line?.err === 'string' ? line.err : null) ||
+          line.error ||
+          line.msg ||
+          '(no message)',
+      );
       // Group by (event, message), not message alone.
       //
       // The shared logger emits TWO lines per failed request: an
@@ -131,6 +144,9 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
           // failure happened somewhere downstream.
           has_stack_trace: Boolean(line?.err?.stack),
           message: String(errMsg).slice(0, 300),
+          // Which service(s) logged this group - in "all" mode a message
+          // alone does not say who wrote it.
+          services: [],
           count: 0,
           first_seen: null,
           last_seen: null,
@@ -142,12 +158,14 @@ export async function run({ service, time_range = '15m', level = 'error' }) {
             route: line.route ?? null,
             status: line.status ?? null,
             request_id: line.request_id ?? null,
+            upstream: line.upstream ? named(String(line.upstream)) : null,
             stack: line?.err?.stack ? String(line.err.stack).split('\n').slice(0, 6).join('\n') : null,
           },
         });
       }
       const g = groups.get(key);
       g.count++;
+      if (!g.services.includes(svcName)) g.services.push(svcName);
 
       if (!perService.has(svcName)) perService.set(svcName, { service: svcName, lines: 0, exceptions: 0 });
       const ps = perService.get(svcName);

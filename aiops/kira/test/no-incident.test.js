@@ -15,72 +15,55 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { investigate, noIncidentEvidence } from '../src/agent.js';
 import { run as fetchMetrics } from '../src/tools/fetch_metrics.js';
+import { stubPrometheus, restore } from './helpers/prometheus.js';
 
 // ---- fetch_metrics against a stubbed Prometheus ---------------------------
 // The incident's real numbers: lots of 401s on gateway and frontend, zero 5xx.
-const realFetch = globalThis.fetch;
-after(() => { globalThis.fetch = realFetch; });
-
-function stubPrometheus({ with5xx = false } = {}) {
-  const vec = (rows) => ({ status: 'success', data: { resultType: 'vector', result: rows.map(([metric, v]) => ({ metric, value: [0, String(v)] })) } });
-  globalThis.fetch = async (url) => {
-    const expr = new URL(url).searchParams.get('query');
-    let body;
-    if (expr.startsWith('up{')) body = vec(['gateway', 'frontend', 'order', 'orders'].map((job) => [{ job }, 1]));
-    else if (expr.startsWith('time() - max by (job) (process_start_time_seconds')) {
-      body = vec(['gateway', 'frontend', 'order', 'orders'].map((job) => [{ job }, 3600])); // all pods an hour old
-    } else if (expr.includes('increase(http_requests_total')) {
-      body = vec(with5xx ? [[{ job: 'order', status: '500' }, 12]] : []);
-    }
-    else if (expr.includes('histogram_quantile')) body = vec([]);
-    else if (expr.startsWith('sum by (job,route,status)')) {
-      body = vec([
-        [{ job: 'gateway', route: '/api/orders', status: '401' }, 3393],
-        ...(with5xx ? [[{ job: 'order', route: '/orders', status: '500' }, 12]] : []),
-      ]);
-    } else if (expr.startsWith('sum by (job,status)')) {
-      body = vec([
-        [{ job: 'gateway', status: '200' }, 900], [{ job: 'gateway', status: '401' }, 3393],
-        [{ job: 'frontend', status: '200' }, 900], [{ job: 'frontend', status: '401' }, 3373],
-        [{ job: 'order', status: '201' }, 40], [{ job: 'orders', status: '200' }, 60],
-        ...(with5xx ? [[{ job: 'order', status: '500' }, 12]] : []),
-      ]);
-    } else if (expr.includes('status=~"5.."')) body = vec(with5xx ? [[{ job: 'order' }, 0.05]] : []);
-    else body = vec(['gateway', 'frontend', 'order', 'orders'].map((job) => [{ job }, 1.2]));
-    return new Response(JSON.stringify(body), { status: 200 });
-  };
+after(restore);
+function stubIncident({ with5xx = false } = {}) {
+  stubPrometheus({
+    rate5xx: with5xx ? { order: 0.05 } : {},
+    window: [
+      [{ job: 'gateway', status: '401' }, 3393], [{ job: 'frontend', status: '401' }, 3373],
+      ...(with5xx ? [[{ job: 'order', status: '500' }, 12]] : []),
+    ],
+    routes: [
+      [{ job: 'gateway', route: '/api/orders', status: '401' }, 3393],
+      ...(with5xx ? [[{ job: 'order', route: '/orders', status: '500' }, 12]] : []),
+    ],
+  });
 }
 
 test('2: fetch_metrics reports 4xx separately from 5xx; 401s are not "errors"', async () => {
-  stubPrometheus();
+  stubIncident();
   const r = await fetchMetrics({ service: 'all', time_range: '15m' });
   const gw = r.services.find((s) => s.service === 'gateway');
   assert.equal(gw.error_rate_percent, 0);
-  assert.deepEqual(gw.server_errors_5xx_since_pod_start, { total: 0, by_status: [] });
-  assert.equal(gw.client_errors_4xx_since_pod_start.total, 3393);
+  assert.deepEqual(gw.server_errors_5xx_in_window, { approx_total: 0, by_status: [] });
+  assert.equal(gw.client_errors_4xx_in_window.approx_total, 3393);
+  assert.ok(!Object.keys(gw).some((k) => /since_pod_start/.test(k)), 'no lifetime fields');
   assert.deepEqual(gw.failing_routes, [], 'failing_routes is 5xx only');
-  assert.deepEqual(gw.client_error_routes_4xx, [{ route: '/api/orders', status: '401', count: 3393 }]);
-  assert.ok(!gw.other_responses_since_pod_start.some((s) => s.status.startsWith('4')));
+  assert.deepEqual(gw.client_error_routes_4xx, [{ route: '/api/orders', status: '401', approx_count: 3393 }]);
   assert.deepEqual(r.summary.services_with_errors, []);
   assert.equal(r.summary.server_errors_5xx_in_window, false);
-  assert.deepEqual(r.summary.client_errors_4xx_since_pod_start, { frontend: 3373, gateway: 3393 });
+  assert.deepEqual(r.summary.client_errors_4xx_in_window, { frontend: 3373, gateway: 3393 });
   assert.match(r.summary.client_errors_note, /not server failures, not a root cause/);
 });
 
 test('2: a real 5xx still shows up as a server error', async () => {
-  stubPrometheus({ with5xx: true });
+  stubIncident({ with5xx: true });
   const r = await fetchMetrics({ service: 'all', time_range: '15m' });
   const order = r.services.find((s) => s.service === 'order');
   assert.ok(order.error_rate_percent > 0);
-  assert.equal(order.server_errors_5xx_since_pod_start.total, 12);
-  assert.deepEqual(order.failing_routes, [{ route: '/orders', status: '500', count: 12 }]);
+  assert.equal(order.server_errors_5xx_in_window.approx_total, 12);
+  assert.deepEqual(order.failing_routes, [{ route: '/orders', status: '500', approx_count: 12 }]);
   assert.deepEqual(r.summary.services_with_errors, ['order']);
 });
 
 // ---- the guard, end to end with a scripted model ----------------------------
 
 const LOGS_EMPTY = { service: 'order', level_filter: 'error', total_matching_lines: 0, distinct_messages: 0, messages: [] };
-const LOGS_ERR = { service: 'order', level_filter: 'error', total_matching_lines: 4, distinct_messages: 1, messages: [{ message: 'TypeError' }] };
+const LOGS_ERR = { service: 'order', level_filter: 'error', total_matching_lines: 4, exception_count: 2, distinct_messages: 1, messages: [{ event: 'unhandled_error', has_stack_trace: true, count: 2, message: 'TypeError' }] };
 const HEALTHY = { summary: { total_pods: 8, ready_pods: 8, total_restarts: 68, recent_restarts: 0 } };
 
 // What qwen2.5:7b actually produced: a confident root cause from 401 counts.
@@ -113,7 +96,7 @@ const allThree = [
 ];
 
 async function runWith({ with5xx = false, logs = LOGS_EMPTY, health = HEALTHY } = {}) {
-  stubPrometheus({ with5xx });
+  stubIncident({ with5xx });
   const runTool = async (name, args) =>
     name === 'fetch_metrics' ? fetchMetrics(args) : name === 'fetch_logs' ? logs : health;
   const client = scripted([{ toolCalls: allThree }, { text: HALLUCINATION }]);

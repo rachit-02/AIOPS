@@ -15,11 +15,11 @@ import { investigate, enforceBlastRadius, callKey } from '../src/agent.js';
 const METRICS = {
   source: 'prometheus',
   services: [
-    { service: 'frontend', error_rate_percent: 12.5, status_counts_since_pod_start: [{ status: '500', count: 9 }] },
-    { service: 'gateway', error_rate_percent: 12.5, status_counts_since_pod_start: [{ status: '500', count: 9 }] },
-    { service: 'order', error_rate_percent: 40, status_counts_since_pod_start: [{ status: '500', count: 9 }] },
-    { service: 'orders', error_rate_percent: 0, status_counts_since_pod_start: [{ status: '200', count: 50 }] },
-    { service: 'product', error_rate_percent: 0, status_counts_since_pod_start: [{ status: '200', count: 80 }] },
+    { service: 'frontend', error_rate_percent: 12.5, server_errors_5xx_in_window: { approx_total: 9, by_status: [{ status: '500', count: 9 }] } },
+    { service: 'gateway', error_rate_percent: 12.5, server_errors_5xx_in_window: { approx_total: 9, by_status: [{ status: '500', count: 9 }] } },
+    { service: 'order', error_rate_percent: 40, server_errors_5xx_in_window: { approx_total: 9, by_status: [{ status: '500', count: 9 }] } },
+    { service: 'orders', error_rate_percent: 0, server_errors_5xx_in_window: { approx_total: 0, by_status: [] } },
+    { service: 'product', error_rate_percent: 0, server_errors_5xx_in_window: { approx_total: 0, by_status: [] } },
   ],
   summary: { services_with_errors: ['frontend', 'gateway', 'order'], highest_error_rate: 'order' },
 };
@@ -165,8 +165,8 @@ test('2: a zero-error service is dropped from the blast radius of the final answ
 
 test('2: `order` is never mistaken for `orders` (or the reverse)', () => {
   const metrics = [{ services: [
-    { service: 'order', error_rate_percent: 0, status_counts_since_pod_start: [] },
-    { service: 'orders', error_rate_percent: 5, status_counts_since_pod_start: [{ status: '500', count: 3 }] },
+    { service: 'order', error_rate_percent: 0, server_errors_5xx_in_window: { approx_total: 0, by_status: [] } },
+    { service: 'orders', error_rate_percent: 5, server_errors_5xx_in_window: { approx_total: 3, by_status: [{ status: '500', count: 3 }] } },
   ] }];
   const text = '### Blast radius\n**Affected services:** orders (origin), order\n- `order` write path impacted\n';
   const { answer, removed } = enforceBlastRadius(text, metrics);
@@ -179,10 +179,21 @@ test('2: no fetch_metrics evidence -> answer left exactly as written', () => {
   assert.equal(enforceBlastRadius(ANSWER, []).answer, ANSWER);
 });
 
-test('2: 5xx since pod start counts as errors even when the current rate is 0', () => {
+test('2: 5xx counted in the window keep a service even when the current rate is 0', () => {
   const metrics = [{ services: [
-    { service: 'orders', error_rate_percent: 0, status_counts_since_pod_start: [{ status: '500', count: 2 }] },
+    { service: 'orders', error_rate_percent: 0, server_errors_5xx_in_window: { approx_total: 2, by_status: [{ status: '500', count: 2 }] } },
   ] }];
   const text = '### Blast radius\n**Affected services:** orders\n';
   assert.equal(enforceBlastRadius(text, metrics).answer, text);
+});
+
+test('3: LIFETIME 5xx (an old pod counter) never keep a service in the blast radius', () => {
+  // The healthy-system run: "order 106 errors since pod start", left over
+  // from a fault disarmed 15 minutes earlier, was reported as current.
+  const metrics = [{ services: [
+    { service: 'order', error_rate_percent: 0, server_errors_5xx_in_window: { approx_total: 0, by_status: [] },
+      server_errors_5xx_since_pod_start: { total: 106 }, status_counts_since_pod_start: [{ status: '500', count: 106 }] },
+  ] }];
+  const { removed } = enforceBlastRadius('### Blast radius\n**Affected services:** order\n', metrics);
+  assert.deepEqual(removed, ['order']);
 });

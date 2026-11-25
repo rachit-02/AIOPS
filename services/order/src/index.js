@@ -2,6 +2,7 @@
 // Reads (history, listing) are served by the separate Orders service.
 import { createService, createPool, callService, asyncHandler as ah } from '../../_shared/index.js';
 import { applyPromo, authorizePayment, fxRate, isSupportedCurrency, promoCodeNames } from './commerce.js';
+import { createIdempotency } from './idempotency.js';
 
 const PRODUCT_URL = process.env.PRODUCT_SERVICE_URL || 'http://product:3000';
 const pool = createPool();
@@ -69,9 +70,21 @@ function buildShipTo(a) {
   return { line1: a.line1.trim(), city: a.city.trim(), postcode: a.postcode.trim().toUpperCase() }; // <-- throws if `a` is undefined
 }
 
+// Duplicate-submit protection: see src/idempotency.js.
+const idempotency = createIdempotency();
+
 app.post('/orders', ah(async (req, res) => {
   const userId = userIdOf(req);
   if (!userId) return res.status(401).json({ error: 'unauthenticated' });
+
+  // A repeat of an attempt that already created an order gets that order back
+  // (201, header idempotent-replayed: true) rather than a second order.
+  const idem = await idempotency.claim(userId, req.headers['idempotency-key'], res);
+  if (idem?.replay) {
+    res.set('idempotent-replayed', 'true');
+    return res.status(201).json(idem.replay);
+  }
+
   const items = req.body?.items;
 
   // Address handling happens BEFORE stock is reserved, so the seeded crash
@@ -149,7 +162,9 @@ app.post('/orders', ah(async (req, res) => {
       );
     }
     await conn.query('COMMIT');
-    res.status(201).json({ ...rows[0], items: reserved.items, promo_label: promo?.label ?? null });
+    const created = { ...rows[0], items: reserved.items, promo_label: promo?.label ?? null };
+    idem?.settle(created);
+    res.status(201).json(created);
   } catch (err) {
     await conn.query('ROLLBACK').catch(() => {});
     await releaseStock(items, req.id);

@@ -281,7 +281,7 @@ export function noIncidentAnswer({ metrics, logs, health }) {
         ? ` 4xx client responses in the window (${client4xx.map(([s, n]) => `${s} ${n}`).join(', ')}) are ` +
           'requests the server correctly refused - not a failure.'
         : ''),
-    `- **Logs:** no error-level lines for ${logServices.join(', ') || 'the services queried'}.`,
+    `- **Logs:** no error-level lines for ${logServices.map((s) => (s === 'all' ? 'any service' : s)).join(', ') || 'the services queried'}.`,
     `- **Health:** ${hs.ready_pods}/${hs.total_pods} pods ready, no restarts in the last 10 minutes.`,
     ...(lastMetrics?.summary?.recently_started_pods?.length
       ? [`- **Caution:** ${lastMetrics.summary.recently_started_pods.map((p) => `${p.service} pod started ${p.age_seconds}s ago`).join(', ')} - ` +
@@ -651,7 +651,10 @@ ${lag}` : '');
       const evidence = { metrics: metricsResults, logs: logsResults, health: healthResults };
       const quiet = quietAnswer(evidence);
       if (quiet) {
-        if (verbose) trace.say(`[no-incident guard: ${quiet.kind}] model conclusion discarded`);
+        // Always kept in the JSON trace, so the override is auditable: what
+        // the model would have said, and why it was not used. (The console
+        // shows only the first line.)
+        trace.say(`[no-incident guard: ${quiet.kind}] model conclusion discarded:\n${res.text}`);
         answer = quiet.answer;
       } else {
         answer = res.text;

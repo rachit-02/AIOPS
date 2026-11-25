@@ -32,7 +32,7 @@ spec:
             # Flipping this to "true" and pushing IS the incident: ArgoCD rolls
             # it out, so even breaking production happens through Git.
             - name: SEED_BUG_NULL_SHIPPING
-              value: "true"
+              value: "false"
           envFrom:
             - configMapRef:
                 name: aiops-service-urls

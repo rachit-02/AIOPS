@@ -181,6 +181,11 @@ header {
 .card-price { font-size: 13px; color: var(--accent-dark); font-weight: 700; margin-top: 2px; }
 .card-stock { font-size: 10.5px; color: var(--ink-faint); }
 .card-stock.low { color: var(--accent); }
+/* Inline stock limit messages: on a product card, in quick view, on a cart line. */
+.stock-note { font-size: 11px; color: var(--err); line-height: 1.35; }
+.stock-note:empty { display: none; }
+.cart-row-meta .stock-note { margin-top: 2px; }
+.qv-note { margin: -4px 0 10px; }
 .card-add {
   margin-top: 6px; width: 100%; padding: 7px; border-radius: var(--radius);
   background: var(--ink); color: var(--bg); border: none; font-weight: 700; font-size: 11.5px;

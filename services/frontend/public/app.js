@@ -257,6 +257,7 @@ function openQuickView(id) {
   $('qvRating').textContent = `${stars(p.rating)} ${p.rating} (${p.review_count} reviews)`;
   $('qvPrice').textContent = money(p.price_cents);
   $('qvDesc').textContent = p.description || '';
+  $('qvNote').textContent = '';
   updateQvWish();
   $('qvScrim').classList.add('open');
 }
@@ -266,16 +267,75 @@ const closeQv = () => $('qvScrim').classList.remove('open');
 // ---------------------------------------------------------------------------
 // Cart
 // ---------------------------------------------------------------------------
+/** Per cart line, a message explaining why its quantity was capped or rejected. */
+const stockNotes = new Map(); // productId -> text
+
+const stockLimitText = (p) =>
+  p.stock <= 0 ? `${p.name} is out of stock.` : `Only ${p.stock} in stock — all of them are already in your cart.`;
+
+/** Show a stock-limit message beside the Add button that was pressed. */
+function showCardNote(id, text) {
+  const body = document.querySelector(`.card-add[data-id="${id}"]`)?.closest('.card-body');
+  if (!body) return;
+  let note = body.querySelector('.stock-note');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'stock-note';
+    note.setAttribute('role', 'status');
+    body.querySelector('.card-add').before(note);
+  }
+  note.textContent = text;
+}
+
+/**
+ * Returns true if the item was added. Never fails silently: hitting the stock
+ * limit says so on the card (and in quick view).
+ */
 function addToCart(id) {
   const p = productById(id);
-  if (!p) return;
+  if (!p) return false;
   const next = (cart.get(p.id) ?? 0) + 1;
   // Client-side guard only. The authoritative check is the atomic
-  // `UPDATE ... WHERE stock >= qty` in the product service.
-  if (next > p.stock) return;
+  // `UPDATE ... WHERE stock >= qty` in the product service, which answers 409.
+  if (next > p.stock) {
+    const text = stockLimitText(p);
+    showCardNote(p.id, text);
+    if (qvCurrent === p.id) $('qvNote').textContent = text;
+    return false;
+  }
   cart.set(p.id, next);
   updateBadges();
   openDrawer();
+  return true;
+}
+
+/**
+ * Re-read live stock and cap the cart to it. The grid's numbers are a snapshot
+ * from page load, and other shoppers (and scripts/traffic.sh) keep buying.
+ * Lines that had to change get an inline note rather than changing silently.
+ */
+async function refreshStock() {
+  const res = await api('/products');
+  if (!res.ok || !Array.isArray(res.data)) return;
+  products = res.data;
+  renderGrid();
+  for (const [id, qty] of cart) {
+    const p = productById(id);
+    if (!p) continue;
+    if (p.stock <= 0) {
+      cart.delete(id);
+      stockNotes.delete(id);
+      showCardNote(id, `${p.name} sold out and was removed from your cart.`);
+    } else if (qty > p.stock) {
+      cart.set(id, p.stock);
+      stockNotes.set(id, `Only ${p.stock} left — quantity reduced from ${qty}.`);
+    }
+  }
+  updateBadges();
+  if (step === 'cart' && $('drawer').classList.contains('open')) {
+    renderCart();
+    $('nextBtn').disabled = cart.size === 0;
+  }
 }
 
 const subtotalCents = () =>
@@ -304,11 +364,15 @@ function renderCart() {
         <div class="cart-row-meta">
           <div class="n">${esc(p.name)}</div>
           <div class="p">${money(p.price_cents)}</div>
+          <div class="stock-note" role="status">${esc(
+            stockNotes.get(Number(id)) ?? (qty >= p.stock ? `Max available — only ${p.stock} in stock` : ''),
+          )}</div>
         </div>
         <div class="qty">
           <button data-id="${id}" data-d="-1" aria-label="Remove one ${esc(p.name)}">−</button>
           <span>${qty}</span>
-          <button data-id="${id}" data-d="1" ${qty >= p.stock ? 'disabled' : ''} aria-label="Add one ${esc(p.name)}">+</button>
+          <button data-id="${id}" data-d="1" ${qty >= p.stock ? 'disabled' : ''}
+                  title="${qty >= p.stock ? `Only ${p.stock} in stock` : ''}" aria-label="Add one ${esc(p.name)}">+</button>
         </div>
       </div>`;
     })
@@ -568,6 +632,8 @@ function openDrawer() {
   $('drawer').setAttribute('aria-hidden', 'false');
   $('scrim').classList.add('open');
   setStep('cart');
+  // Pick up stock bought by anyone else since the page loaded.
+  refreshStock().catch(() => {});
 }
 function closeDrawer() {
   $('drawer').classList.remove('open');
@@ -667,12 +733,23 @@ async function placeOrder() {
 
     if (!res.ok) {
       showKira(res);
+      if (res.status === 409) {
+        // The server refused for stock. Re-read it and cap the cart so the
+        // shopper sees exactly which line changed when they go back.
+        const id = Number(/product (\d+)/.exec(res.data?.error ?? '')?.[1]);
+        await refreshStock();
+        const p = productById(id);
+        if (p && cart.has(id) && !stockNotes.has(id)) {
+          stockNotes.set(id, p.stock > 0 ? `Only ${p.stock} in stock.` : 'Sold out.');
+        }
+      }
       return;
     }
     // The order exists. Clear the cart BEFORE the read-back, so no path back
     // to the payment step can find a full cart and submit it again.
     checkoutKey = null;
     cart.clear();
+    stockNotes.clear();
     appliedPromo = null;
     // Reset the demo switch after a completed order. Left sticky, one
     // experiment with it silently poisons every subsequent checkout in the
@@ -882,7 +959,10 @@ $('cartList').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-d]');
   if (!b) return;
   const id = Number(b.dataset.id);
-  const n = (cart.get(id) ?? 0) + Number(b.dataset.d);
+  const p = productById(id);
+  // Never above live stock, even if the button state is somehow stale.
+  const n = Math.min((cart.get(id) ?? 0) + Number(b.dataset.d), p ? p.stock : Infinity);
+  stockNotes.delete(id); // the shopper has acted on the note
   if (n <= 0) cart.delete(id);
   else cart.set(id, n);
   updateBadges();
@@ -925,8 +1005,8 @@ $('qvScrim').addEventListener('click', (e) => {
 });
 $('qvWish').addEventListener('click', () => toggleWish(qvCurrent));
 $('qvAdd').addEventListener('click', () => {
-  addToCart(qvCurrent);
-  closeQv();
+  // Stay open on failure so the stock message in the modal is actually seen.
+  if (addToCart(qvCurrent)) closeQv();
 });
 
 $('wishBtn').addEventListener('click', () => {

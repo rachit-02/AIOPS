@@ -127,7 +127,22 @@ separately (`server_errors_5xx_since_pod_start` vs
   the correct answer is "No active incident found".** Do not construct a
   root cause from 4xx counts, latency, or the service diagram.
 
-### Rule 5 — never repeat a call
+### Rule 5 — metrics lag a freshly restarted pod; logs do not
+
+Changing a service's configuration restarts its pod. For the first minute
+or two its counters are reset and rate windows have too few samples, so
+`fetch_metrics` can show **0 5xx while the service is already failing**.
+`fetch_metrics` flags this (`recently_started_pods`, `metrics_lag_note`), and
+a tool result may carry a `CROSS-CHECK` note when logs and metrics disagree.
+When error logs exist for a service, they are current evidence: never call
+that service healthy because its metrics read 0.
+
+`fetch_logs` with `service: "all"` already covers every service and its
+`by_service` breakdown names who threw. Do not then query services one by one
+— you have a limited number of turns (about 12). Once you have all three
+signals, write the diagnosis.
+
+### Rule 6 — never repeat a call
 
 Do not call the same tool with the same arguments twice in one
 investigation. The data will not have changed in the minute you have been

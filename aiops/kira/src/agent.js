@@ -95,20 +95,68 @@ const NEGATION = /\b(not|unaffected|no errors?|0 errors|zero errors|healthy|unch
  * services were measured, and which of them showed errors (a non-zero 5xx
  * rate, or any 5xx since pod start).
  */
-export function errorEvidence(metricsResults) {
+export function errorEvidence(metricsResults, logsResults = []) {
   const seen = new Set();
   const erroring = new Set();
   for (const r of metricsResults) {
     for (const s of r?.services ?? []) {
       seen.add(s.service);
       const fiveXX =
+        (s.server_errors_5xx_in_window?.approx_total ?? 0) > 0 ||
         (s.server_errors_5xx_since_pod_start?.total ?? 0) > 0 ||
         (s.status_counts_since_pod_start ?? []).some((c) => String(c.status).startsWith('5') && c.count > 0);
       if (s.error_rate_percent > 0 || fiveXX) erroring.add(s.service);
     }
   }
+  // Error LOGS are evidence too. Metrics lag a freshly restarted pod, so a
+  // service can have error lines while fetch_metrics still shows 0 5xx; it
+  // must not be dropped from the blast radius for that.
+  for (const svc of servicesWithErrorLogs(logsResults)) erroring.add(svc);
   const zeroErrors = [...seen].filter((s) => !erroring.has(s));
   return { erroring, zeroErrors };
+}
+
+/**
+ * Services that fetch_logs found error-level lines (or exceptions) for.
+ * In "all" mode the per-service breakdown says which; for a single service,
+ * the result is that service.
+ */
+export function servicesWithErrorLogs(logsResults) {
+  const out = new Set();
+  for (const r of logsResults) {
+    if (!r) continue;
+    const errorish = r.level_filter === 'error' || (r.exception_count ?? 0) > 0;
+    if (!errorish || !((r.total_matching_lines ?? 0) > 0)) continue;
+    if (Array.isArray(r.by_service)) {
+      for (const s of r.by_service) {
+        if (s.lines > 0 && (r.level_filter === 'error' || s.exceptions > 0)) out.add(s.service);
+      }
+    } else if (r.service && r.service !== 'all') {
+      out.add(r.service);
+    }
+  }
+  return out;
+}
+
+/**
+ * The cross-signal check the tools cannot do themselves (each reads one
+ * system). Returns a note when error logs and metrics disagree: logs show
+ * errors for a service that fetch_metrics reported with zero 5xx. The usual
+ * reason is a pod that just restarted (arming the seeded fault does exactly
+ * that): reset counters and too few scrapes for rate().
+ */
+export function metricsLagNote(metricsResults, logsResults) {
+  if (!metricsResults.length) return null;
+  const withLogs = servicesWithErrorLogs(logsResults);
+  const { erroring } = errorEvidence(metricsResults);
+  const measured = new Set(metricsResults.flatMap((r) => (r?.services ?? []).map((s) => s.service)));
+  const lagging = [...withLogs].filter((s) => measured.has(s) && !erroring.has(s));
+  if (!lagging.length) return null;
+  return (
+    `CROSS-CHECK: fetch_logs shows error lines for ${lagging.join(', ')}, but fetch_metrics reported 0 5xx ` +
+    `for ${lagging.length === 1 ? 'it' : 'them'}. Metrics can lag a freshly started pod (counters reset; rate ` +
+    'windows need a few scrapes). Treat the error logs as current evidence: this is NOT "no errors".'
+  );
 }
 
 /**
@@ -126,8 +174,8 @@ export function errorEvidence(metricsResults) {
  *
  * @returns {{ answer: string, removed: string[] }}
  */
-export function enforceBlastRadius(answer, metricsResults) {
-  const { erroring, zeroErrors } = errorEvidence(metricsResults);
+export function enforceBlastRadius(answer, metricsResults, logsResults = []) {
+  const { erroring, zeroErrors } = errorEvidence(metricsResults, logsResults);
   if (!zeroErrors.length) return { answer, removed: [] };
 
   const lines = answer.split('\n');
@@ -196,7 +244,13 @@ export function noIncidentEvidence({ metrics, logs, health }) {
       && (r.services ?? []).every((s) => !(s.error_rate_percent > 0)))
     && metrics.some((r) => (r.services ?? []).some((s) => s.scrape_up));
   const errorLogs = logs.filter((r) => r.level_filter === 'error');
-  const l = errorLogs.length > 0 && errorLogs.every((r) => (r.total_matching_lines ?? 0) === 0);
+  // ANY error evidence in ANY log result vetoes the guard - including a
+  // per-service query that found errors after an "all" query found none
+  // (observed: the fault rolled out between the two calls).
+  const anyErrorLines = logs.some(
+    (r) => (r.exception_count ?? 0) > 0 || (r.level_filter === 'error' && (r.total_matching_lines ?? 0) > 0),
+  );
+  const l = !anyErrorLines && errorLogs.length > 0 && errorLogs.every((r) => (r.total_matching_lines ?? 0) === 0);
   const h = health.length > 0 && health.every((r) => {
     const s = r.summary ?? {};
     return s.total_pods > 0 && s.ready_pods === s.total_pods && (s.recent_restarts ?? 0) === 0;
@@ -225,6 +279,10 @@ export function noIncidentAnswer({ metrics, logs, health }) {
         : ''),
     `- **Logs:** no error-level lines for ${logServices.join(', ') || 'the services queried'}.`,
     `- **Health:** ${hs.ready_pods}/${hs.total_pods} pods ready, no restarts in the last 10 minutes.`,
+    ...(lastMetrics?.summary?.recently_started_pods?.length
+      ? [`- **Caution:** ${lastMetrics.summary.recently_started_pods.map((p) => `${p.service} pod started ${p.age_seconds}s ago`).join(', ')} - ` +
+          'a change may still be rolling out and its errors may not be visible yet.']
+      : []),
     '',
     '### Blast radius',
     '**Affected services:** none. No service is returning server errors.',
@@ -236,6 +294,68 @@ export function noIncidentAnswer({ metrics, logs, health }) {
     'Nothing to prevent. _This answer comes from Kira\'s no-incident guard, built directly from the tool ' +
       'results above; the model\'s own conclusion was not used because the evidence contains no failure._',
   ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Turn limit: partial diagnosis
+// ---------------------------------------------------------------------------
+
+export const PARTIAL_MARK = '**Partial investigation (turn limit reached)**';
+
+/** A deterministic five-heading answer from the evidence, if the model gives nothing. */
+export function evidenceDigest({ metrics, logs, health }) {
+  const { erroring } = errorEvidence(metrics);
+  const withLogs = [...servicesWithErrorLogs(logs)];
+  const topLog = logs.flatMap((r) => r?.messages ?? []).sort((a, b) => (b.has_stack_trace - a.has_stack_trace) || (b.count - a.count))[0];
+  const hs = health.at(-1)?.summary;
+  const affected = [...new Set([...erroring, ...withLogs])];
+  return [
+    '### Root cause',
+    'Not determined - the model did not write a conclusion. The evidence gathered so far is below.',
+    '',
+    '### Evidence',
+    `- **Metrics:** ${metrics.length ? (erroring.size ? `5xx on ${[...erroring].join(', ')}.` : 'no 5xx reported.') : 'not gathered.'}`,
+    `- **Logs:** ${withLogs.length ? `error lines for ${withLogs.join(', ')}${topLog ? `; most significant: "${topLog.message}"${topLog.has_stack_trace ? ' (with stack trace)' : ''}` : ''}.` : logs.length ? 'no error lines found.' : 'not gathered.'}`,
+    `- **Health:** ${hs ? `${hs.ready_pods}/${hs.total_pods} pods ready, ${hs.recent_restarts ?? 0} recent restarts.` : 'not gathered.'}`,
+    '',
+    '### Blast radius',
+    `**Affected services:** ${affected.length ? affected.join(', ') : 'unknown'}`,
+    '',
+    '### Recommended fix',
+    'Not determined. Start from the error logs above; re-run the investigation for a full diagnosis.',
+    '',
+    '### Prevention',
+    'Not determined.',
+  ].join('\n');
+}
+
+async function partialDiagnosis({ client, system, messages, trace, missing, evidence, verbose }) {
+  messages.push({
+    role: 'user',
+    text:
+      `TURN LIMIT REACHED (${config.maxTurns} turns). Do not call any more tools. Using ONLY the tool ` +
+      'results already in this conversation, write your diagnosis now in exactly the five-heading format ' +
+      '(Root cause, Evidence, Blast radius, Recommended fix, Prevention). Cite the values you have. Where ' +
+      'the evidence is incomplete, say what is missing instead of guessing.',
+  });
+  let text = '';
+  try {
+    // No tools offered, so the only possible reply is text. (Anthropic
+    // rejects a conversation containing tool_use blocks without the tool
+    // definitions, so they stay declared there; any call is ignored below.)
+    const res = await client.chat({ system, messages, tools: client.provider === 'anthropic' ? toolDefinitions : [] });
+    trace.addUsage(res.usage);
+    text = (res.text ?? '').trim();
+    if (verbose && text) trace.say('[turn limit] final no-tool diagnosis');
+  } catch {
+    text = '';
+  }
+  if (!text) text = evidenceDigest(evidence);
+  const header =
+    `${PARTIAL_MARK} - all ${config.maxTurns} turns were used, so this was written from the evidence gathered so far` +
+    (missing.length ? `; never called: ${missing.join(', ')}` : '') +
+    '.';
+  return `${header}\n\n${text}`;
 }
 
 /**
@@ -270,6 +390,8 @@ export async function investigate(
   /** Every successful fetch_logs / fetch_health result, for the no-incident guard. */
   const logsResults = [];
   const healthResults = [];
+  /** Lag notes already shown to the model, so each is said once. */
+  const lagNoted = new Set();
   let nudgesLeft = config.maxToolNudges;
   let answer = '';
   let turn = 0;
@@ -345,7 +467,16 @@ export async function investigate(
               if (call.name === 'fetch_logs') logsResults.push(result);
               if (call.name === 'fetch_health') healthResults.push(result);
               trace.toolEnd(handle, { ok: true, result, summary: summarise(call.name, result) });
-              return { role: 'tool', toolCallId: call.id, name: call.name, content: JSON.stringify(result) };
+              // Logs vs metrics disagreement (see metricsLagNote): tell the
+              // model on whichever result arrives second.
+              const lag =
+                call.name === 'fetch_logs' || call.name === 'fetch_metrics'
+                  ? metricsLagNote(metricsResults, logsResults)
+                  : null;
+              const content = JSON.stringify(result) + (lag && !lagNoted.has(lag) ? `
+${lag}` : '');
+              if (lag) lagNoted.add(lag);
+              return { role: 'tool', toolCallId: call.id, name: call.name, content };
             } catch (err) {
               fetched.delete(key); // do not cache failures
               trace.toolEnd(handle, { ok: false, error: err.message });
@@ -410,11 +541,23 @@ export async function investigate(
     break;
   }
 
-  if (turn >= config.maxTurns) answer += `\n\n[stopped: hit the ${config.maxTurns}-turn limit]`;
+  // Turn limit reached without a conclusion. Observed: qwen2.5:7b queried
+  // every service's logs one by one and ran out of turns, returning nothing.
+  // The evidence gathered by then is usually enough, so ask once more - no
+  // tools - for the diagnosis from what is already in the conversation.
+  if (!answer) {
+    const missing = REQUIRED_TOOLS.filter((t) => !called.has(t));
+    const evidence = { metrics: metricsResults, logs: logsResults, health: healthResults };
+    if (missing.length === 0 && noIncidentEvidence(evidence)) {
+      answer = noIncidentAnswer(evidence);
+    } else {
+      answer = await partialDiagnosis({ client, system, messages, trace, missing, evidence, verbose });
+    }
+  }
 
   // Evidence check: nothing with zero errors in fetch_metrics stays in the
   // blast radius. See enforceBlastRadius().
-  answer = enforceBlastRadius(answer, metricsResults).answer;
+  answer = enforceBlastRadius(answer, metricsResults, logsResults).answer;
 
   const summary = trace.finish(answer);
   onEvent({ type: 'answer', answer, ...summary });

@@ -27,6 +27,11 @@ function stubPrometheus({ with5xx = false } = {}) {
     const expr = new URL(url).searchParams.get('query');
     let body;
     if (expr.startsWith('up{')) body = vec(['gateway', 'frontend', 'order', 'orders'].map((job) => [{ job }, 1]));
+    else if (expr.startsWith('time() - max by (job) (process_start_time_seconds')) {
+      body = vec(['gateway', 'frontend', 'order', 'orders'].map((job) => [{ job }, 3600])); // all pods an hour old
+    } else if (expr.includes('increase(http_requests_total')) {
+      body = vec(with5xx ? [[{ job: 'order', status: '500' }, 12]] : []);
+    }
     else if (expr.includes('histogram_quantile')) body = vec([]);
     else if (expr.startsWith('sum by (job,route,status)')) {
       body = vec([

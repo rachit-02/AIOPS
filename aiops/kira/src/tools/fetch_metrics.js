@@ -66,7 +66,11 @@ export async function run({ service, time_range = '15m' }) {
   // silently average over 5m of history.
   const w = `${Math.max(60, Math.min(seconds, 600))}s`;
 
-  const [rate, errRate, p50, p95, p99, byStatus, byRoute, up] = await Promise.all([
+  // The full requested window (not clamped like `w`), for the restart-proof
+  // 5xx figure below.
+  const win = `${Math.max(60, seconds)}s`;
+
+  const [rate, errRate, p50, p95, p99, byStatus, byRoute, up, err5xxWindow, podAge] = await Promise.all([
     instant(`sum by (job) (rate(http_requests_total{${sel}}[${w}]))`),
     instant(`sum by (job) (rate(http_requests_total{${sel},status=~"5.."}[${w}]))`),
     instant(`histogram_quantile(0.50, sum by (le,job) (rate(http_request_duration_seconds_bucket{${sel}}[${w}])))`),
@@ -81,6 +85,17 @@ export async function run({ service, time_range = '15m' }) {
     instant(`sum by (job,status) (http_requests_total{${sel}})`),
     instant(`sum by (job,route,status) (http_requests_total{${sel},status=~"[45].."})`),
     instant(`up{${sel}}`),
+    // 5xx WITHIN THE WINDOW, summed across every pod series that existed in
+    // it. increase() is computed per series and handles counter resets, so an
+    // old pod's errors and a new pod's errors both count - unlike the raw
+    // totals above, which restart from zero with the pod. Arming the seeded
+    // fault RESTARTS the order pod, which is exactly when "since pod start"
+    // is least informative. Approximate (increase() extrapolates at the window
+    // edges), so it is used to answer "were there 5xx?", not "exactly how many".
+    instant(`sum by (job,status) (increase(http_requests_total{${sel},status=~"5.."}[${win}]))`),
+    // Age of the youngest pod per service. A pod a minute old has reset
+    // counters and fewer than a handful of scrapes, so every rate is unreliable.
+    instant(`time() - max by (job) (process_start_time_seconds{${sel}})`),
   ]);
 
   const pick = (arr, job) => arr.find((r) => r.labels.job === job)?.value;
@@ -93,6 +108,8 @@ export async function run({ service, time_range = '15m' }) {
   const is5xx = (s) => String(s).startsWith('5');
   const is4xx = (s) => String(s).startsWith('4');
   const sum = (list) => list.reduce((n, x) => n + x.count, 0);
+  /** A pod this young has reset counters and too few scrapes for rate(). */
+  const FRESH_POD_SECONDS = 300;
 
   const services = jobs.map((job) => {
     const rps = pick(rate, job) ?? 0;
@@ -109,6 +126,11 @@ export async function run({ service, time_range = '15m' }) {
       .sort((a, b) => b.count - a.count);
     const server = statuses.filter((s) => is5xx(s.status));
     const client = statuses.filter((s) => is4xx(s.status));
+    const windowed = err5xxWindow
+      .filter((r) => r.labels.job === job && is5xx(r.labels.status) && r.value >= 0.5)
+      .map((r) => ({ status: r.labels.status, count: Math.round(r.value) }));
+    const age = pick(podAge, job);
+    const fresh = Number.isFinite(age) && age < FRESH_POD_SECONDS;
 
     return {
       service: job,
@@ -118,6 +140,11 @@ export async function run({ service, time_range = '15m' }) {
       // 0/0 -> NaN on an idle service.
       error_rate_percent: rps > 0 ? round((eps / rps) * 100) : 0,
       latency_seconds: { p50: round(pick(p50, job), 4), p95: round(pick(p95, job), 4), p99: round(pick(p99, job), 4) },
+      // 5xx in the whole query window across old AND new pods - survives a
+      // pod restart. Approximate; see the query above.
+      server_errors_5xx_in_window: { approx_total: sum(windowed), by_status: windowed },
+      youngest_pod_age_seconds: Number.isFinite(age) ? Math.round(age) : null,
+      pod_started_recently: fresh,
       // All counts below are "since the pod started", NOT "within the query
       // window". Named explicitly so they are not misread as windowed counts.
       server_errors_5xx_since_pod_start: { total: sum(server), by_status: server },
@@ -129,7 +156,15 @@ export async function run({ service, time_range = '15m' }) {
     };
   });
 
-  const erroring = services.filter((s) => s.error_rate_percent > 0);
+  // Erroring = any 5xx evidence: a non-zero windowed rate, 5xx counted in the
+  // window across pod restarts, or 5xx on a pod too young for rate() to show.
+  const erroring = services.filter(
+    (s) =>
+      s.error_rate_percent > 0 ||
+      s.server_errors_5xx_in_window.approx_total > 0 ||
+      (s.pod_started_recently && s.server_errors_5xx_since_pod_start.total > 0),
+  );
+  const freshPods = services.filter((s) => s.pod_started_recently);
   const with4xx = services.filter((s) => s.client_errors_4xx_since_pod_start.total > 0);
 
   return {
@@ -142,6 +177,15 @@ export async function run({ service, time_range = '15m' }) {
       // "erroring" means.
       services_with_errors: erroring.map((s) => s.service),
       server_errors_5xx_in_window: erroring.length > 0,
+      // A restarted pod (e.g. the one a config change just rolled out) has
+      // reset counters and needs at least two scrapes before rate() or
+      // increase() can show anything. A 0 for it is not evidence of health.
+      recently_started_pods: freshPods.map((s) => ({ service: s.service, age_seconds: s.youngest_pod_age_seconds })),
+      metrics_lag_note: freshPods.length
+        ? `${freshPods.map((s) => `${s.service} (${s.youngest_pod_age_seconds}s)`).join(', ')} started recently: ` +
+          'its counters reset and rate windows need a few scrapes, so 5xx figures for it may LAG reality by a ' +
+          'minute or two. If fetch_logs shows errors for it, trust the logs - do not conclude "no errors".'
+        : null,
       client_errors_4xx_since_pod_start: Object.fromEntries(
         with4xx.map((s) => [s.service, s.client_errors_4xx_since_pod_start.total]),
       ),

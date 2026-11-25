@@ -22,11 +22,11 @@
 #
 # OUTPUT
 # One summary line every ~10 requests:
-#   [  40 req] ok=28  4xx=8 (409 out-of-stock=0)  failed=4 (5xx=0, no-response=4)  last=201
-# 4xx is normally the address-less orders (400 by design). A 409 means the
-# product it picked is out of stock: this script only buys products 1-5, so
-# over time it sells them out. "failed" is what the dashboard's error panel
-# and an unreachable stack look like.
+#   [  40 req] ok=34  4xx=4 (409 out-of-stock=0)  failed=2 (5xx=2, no-response=0)  orders=4  in-stock=24  last=200
+# 4xx is normally the address-less orders (400 by design). Orders only target
+# products that were in stock on the last catalogue read, so a 409 is a rare
+# race. "failed" is what the dashboard's error panel and an unreachable stack
+# look like. Out of stock everywhere? Run scripts/restock.sh.
 set -uo pipefail
 
 ORIGIN=${FRONTEND:-http://localhost:8090}
@@ -58,13 +58,13 @@ done
 
 # 2. A throwaway account, so orders are placed by a real authenticated user.
 email="traffic$(date +%s)@example.com"
-reg=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST "$B/auth/register" -H "$J" \
-  -d "{\"email\":\"$email\",\"name\":\"Traffic\",\"password\":\"password123\"}")
+curl -s --max-time 10 -X POST "$B/auth/register" -H "$J" \
+  -d "{\"email\":\"$email\",\"name\":\"Traffic\",\"password\":\"password123\"}" >/dev/null
 TOKEN=$(curl -s --max-time 10 -X POST "$B/auth/login" -H "$J" \
   -d "{\"email\":\"$email\",\"password\":\"password123\"}" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 if [ -z "$TOKEN" ]; then
-  [ "$reg" = 000 ] && unreachable
-  echo "could not authenticate against $B (register answered HTTP $reg)" >&2
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$B/products")" = 000 ] && unreachable
+  echo "could not authenticate against $B (register/login failed - is the auth service healthy?)" >&2
   exit 1
 fi
 
@@ -79,10 +79,12 @@ CARD='"card":"4242424242424242"'
 echo "generating load against $B  (Ctrl-C to stop)"
 
 # Each request writes its HTTP status to its own file; tallied after `wait`.
-total=0 ok=0 c4=0 c409=0 c5=0 nores=0 last=- next_report=10 seq=0
+total=0 ok=0 c4=0 c409=0 c5=0 nores=0 orders=0 last=- next_report=10 seq=0
+# Sets NF to the next result file. NOT called via $(...): a subshell would lose seq.
+next_file() { seq=$((seq + 1)); printf -v NF '%s/%08d' "$TMP" "$seq"; }
 req() {
-  seq=$((seq + 1))
-  curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" > "$TMP/$(printf '%08d' "$seq")" &
+  next_file; local f=$NF
+  curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" > "$f" &
 }
 tally() {
   local f c
@@ -100,17 +102,57 @@ tally() {
   done
 }
 
+# Browse the catalogue and remember which products are in stock RIGHT NOW, so
+# orders never target a sold-out product (which only produces 409s and writes
+# nothing). Sets IN_STOCK to a space-separated list of product ids.
+IN_STOCK=''
+browse_products() {
+  local out code body f
+  next_file; f=$NF
+  out=$(curl -s --max-time 10 -w '\n%{http_code}' "$B/products")
+  code=${out##*$'\n'}; body=${out%$'\n'*}
+  printf '%s' "$code" > "$f"
+  [ "$code" = 200 ] || return 0   # keep the previous list on a failed read
+  # One product object per line, then "id stock" pairs, keep stock > 0.
+  IN_STOCK=$(printf '%s' "$body" | tr '{' '\n' \
+    | sed -n 's/.*"id":\([0-9]*\),.*"stock":\([0-9]*\).*/\1 \2/p' \
+    | awk '$2 > 0 { printf "%s ", $1 }')
+}
+pick_in_stock() {
+  local ids=($IN_STOCK)
+  echo "${ids[$((RANDOM % ${#ids[@]}))]}"
+}
+
+# RATE. Each cycle is 2 browse requests (catalogue + order history). Every 5th
+# cycle places ONE real order (qty 1, in-stock product) - about 1 order per 10
+# browse requests, so a long run takes stock down slowly instead of selling
+# products out. Offset from it, every 5th cycle also sends one order WITHOUT
+# an address: 400 normally, 500 while the seeded fault is on. That request is
+# rejected before stock is reserved, so it never consumes stock.
+ORDER_EVERY=5
+was_empty=0
 n=0
 while true; do
   n=$((n+1))
-  req "$B/products"
+  browse_products
   req "$B/orders" -H "$AUTH"
-  req -X POST "$B/orders" -H "$AUTH" -H "$J" \
-    -d "{\"items\":[{\"productId\":$((RANDOM % 5 + 1)),\"qty\":1}],$ADDR,$CARD}"
-  # Every third cycle, omit the address: 400 normally, 500 during an incident.
-  if [ $((n % 3)) -eq 0 ]; then
-    req -X POST "$B/orders" -H "$AUTH" -H "$J" \
-      -d "{\"items\":[{\"productId\":$((RANDOM % 5 + 1)),\"qty\":1}],$CARD}"
+
+  if [ -z "$IN_STOCK" ]; then
+    if [ "$was_empty" -eq 0 ]; then
+      echo "nothing is in stock - browse-only traffic until something is restocked (bash scripts/restock.sh)" >&2
+      was_empty=1
+    fi
+  else
+    if [ "$was_empty" -eq 1 ]; then echo "stock is back - resuming orders" >&2; was_empty=0; fi
+    if [ $((n % ORDER_EVERY)) -eq 0 ]; then
+      req -X POST "$B/orders" -H "$AUTH" -H "$J" \
+        -d "{\"items\":[{\"productId\":$(pick_in_stock),\"qty\":1}],$ADDR,$CARD}"
+      orders=$((orders + 1))
+    fi
+    if [ $((n % ORDER_EVERY)) -eq 2 ]; then
+      req -X POST "$B/orders" -H "$AUTH" -H "$J" \
+        -d "{\"items\":[{\"productId\":$(pick_in_stock),\"qty\":1}],$CARD}"
+    fi
   fi
   wait
   tally
@@ -120,12 +162,12 @@ while true; do
   if [ "$n" -le 2 ] && [ "$nores" -eq "$total" ]; then unreachable; fi
 
   if [ "$total" -ge "$next_report" ]; then
-    printf '[%4d req] ok=%d  4xx=%d (409 out-of-stock=%d)  failed=%d (5xx=%d, no-response=%d)  last=%s\n' \
-      "$total" "$ok" "$c4" "$c409" $((c5 + nores)) "$c5" "$nores" "$last"
+    printf '[%4d req] ok=%d  4xx=%d (409 out-of-stock=%d)  failed=%d (5xx=%d, no-response=%d)  orders=%d  in-stock=%d  last=%s\n' \
+      "$total" "$ok" "$c4" "$c409" $((c5 + nores)) "$c5" "$nores" "$orders" "$(wc -w <<< "$IN_STOCK")" "$last"
     while [ "$next_report" -le "$total" ]; do next_report=$((next_report + 10)); done
   fi
 
   [ "$DURATION" -gt 0 ] && [ $(( $(date +%s) - START )) -ge "$DURATION" ] && break
   sleep 2
 done
-echo "done after $n cycles: $total requests, ok=$ok 4xx=$c4 (409 out-of-stock=$c409) failed=$((c5 + nores)) (5xx=$c5, no-response=$nores)"
+echo "done after $n cycles: $total requests, ok=$ok 4xx=$c4 (409 out-of-stock=$c409) failed=$((c5 + nores)) (5xx=$c5, no-response=$nores), orders placed=$orders"

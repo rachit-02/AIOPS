@@ -1,0 +1,12 @@
+# ============================================================================
+# FAULT TEMPLATE none - no fault armed
+# Copied verbatim into infra/k8s/overlays/dev/fault.yaml to ARM this fault
+# (none.yaml disarms). Do not reference this directory from kustomize: only
+# overlays/dev/fault.yaml is live. See infra/k8s/faults/README.md.
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-dev
+  annotations:
+    aiops.dev/active-fault: none

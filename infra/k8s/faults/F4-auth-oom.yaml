@@ -1,0 +1,32 @@
+# ============================================================================
+# FAULT TEMPLATE F4 - out of memory: auth leaks memory until its fault-only 128Mi limit
+# Copied verbatim into infra/k8s/overlays/dev/fault.yaml to ARM this fault
+# (none.yaml disarms). Do not reference this directory from kustomize: only
+# overlays/dev/fault.yaml is live. See infra/k8s/faults/README.md.
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-dev
+  annotations:
+    aiops.dev/active-fault: F4
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+spec:
+  template:
+    spec:
+      containers:
+        - name: auth
+          env:
+            # Leak starts 20 s after boot (after the pod is Ready), 2 MiB/s.
+            - name: SEED_MEMORY_LEAK_MB_PER_S
+              value: "2"
+          resources:
+            # FAULT-ONLY limit (normally 256Mi). Measured normal working set:
+            # 37 MiB, 24 h peak 51 MiB - ~2.5x headroom, so only the leak can
+            # reach it. The kernel OOM-kills the container at its cgroup limit;
+            # it cannot threaten the node.
+            limits: { memory: 128Mi }

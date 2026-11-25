@@ -1,0 +1,12 @@
+# ============================================================================
+# LIVE FAULT FILE - currently: none (no fault armed)
+# Overwritten from infra/k8s/faults/<id>.yaml to arm a fault; from none.yaml
+# to disarm. CI never writes this file. Exactly one fault can be live.
+# See infra/k8s/faults/README.md.
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-dev
+  annotations:
+    aiops.dev/active-fault: none

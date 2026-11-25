@@ -1,0 +1,25 @@
+# ============================================================================
+# FAULT TEMPLATE F1 - code bug: order throws on a missing shipping address
+# Copied verbatim into infra/k8s/overlays/dev/fault.yaml to ARM this fault
+# (none.yaml disarms). Do not reference this directory from kustomize: only
+# overlays/dev/fault.yaml is live. See infra/k8s/faults/README.md.
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiops-dev
+  annotations:
+    aiops.dev/active-fault: F1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+spec:
+  template:
+    spec:
+      containers:
+        - name: order
+          env:
+            - name: SEED_BUG_NULL_SHIPPING
+              value: "true"

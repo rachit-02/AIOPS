@@ -1,5 +1,5 @@
 # ============================================================================
-# FAULT TEMPLATE F2 - latency: product delays every request by 1200 ms
+# FAULT TEMPLATE none - no fault armed
 # Copied verbatim into infra/k8s/overlays/dev/fault.yaml to ARM this fault
 # (none.yaml disarms). Do not reference this directory from kustomize: only
 # overlays/dev/fault.yaml is live. See infra/k8s/faults/README.md.
@@ -9,19 +9,4 @@ kind: Namespace
 metadata:
   name: aiops-dev
   annotations:
-    aiops.dev/active-fault: F2
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: product
-spec:
-  template:
-    spec:
-      containers:
-        - name: product
-          env:
-            # Below order's 3 s and the gateway's 5 s upstream timeouts, so the
-            # fault is pure latency: no 5xx.
-            - name: SEED_PRODUCT_LATENCY_MS
-              value: "1200"
+    aiops.dev/active-fault: none

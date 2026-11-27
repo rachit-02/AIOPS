@@ -1,5 +1,5 @@
 # ============================================================================
-# FAULT TEMPLATE F5 - bad config: orders points at a database host that does not exist
+# FAULT TEMPLATE none - no fault armed
 # Copied verbatim into infra/k8s/overlays/dev/fault.yaml to ARM this fault
 # (none.yaml disarms). Do not reference this directory from kustomize: only
 # overlays/dev/fault.yaml is live. See infra/k8s/faults/README.md.
@@ -9,25 +9,4 @@ kind: Namespace
 metadata:
   name: aiops-dev
   annotations:
-    aiops.dev/active-fault: F5
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: orders
-spec:
-  # Recreate, so the bad pod REPLACES the good one: with the default rolling
-  # update the readiness probe would keep the old pod serving and users would
-  # never see the fault.
-  strategy:
-    type: Recreate
-    rollingUpdate: null
-  template:
-    spec:
-      containers:
-        - name: orders
-          env:
-            # Overrides the Secret's DATABASE_URL (explicit env wins over
-            # envFrom). Wrong HOST, and deliberately no password in Git.
-            - name: DATABASE_URL
-              value: postgresql://aiops_orders@postgres-replica.aiops-dev.svc.cluster.local:5432/aiops
+    aiops.dev/active-fault: none

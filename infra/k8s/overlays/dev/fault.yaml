@@ -1,5 +1,5 @@
 # ============================================================================
-# FAULT TEMPLATE F3 - crash loop: user exits shortly after start
+# FAULT TEMPLATE none - no fault armed
 # Copied verbatim into infra/k8s/overlays/dev/fault.yaml to ARM this fault
 # (none.yaml disarms). Do not reference this directory from kustomize: only
 # overlays/dev/fault.yaml is live. See infra/k8s/faults/README.md.
@@ -9,19 +9,4 @@ kind: Namespace
 metadata:
   name: aiops-dev
   annotations:
-    aiops.dev/active-fault: F3
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: user
-spec:
-  template:
-    spec:
-      containers:
-        - name: user
-          env:
-            # The rolling update keeps the old pod serving; the new one goes to
-            # CrashLoopBackOff. Visible only in pod health.
-            - name: SEED_CRASH_ON_START
-              value: "true"
+    aiops.dev/active-fault: none

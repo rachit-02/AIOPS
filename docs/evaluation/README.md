@@ -89,6 +89,48 @@ wrong services, time to diagnosis, time to visible, guard used, partial,
 trace file, answer excerpt) and `kira-eval-<date>.md` (the per-scenario
 table). Each run's full tool trace is in `aiops/kira/traces/` (local).
 
+## Re-scoring saved answers
+
+```bash
+node scripts/eval-kira --rescore docs/evaluation/kira-eval-<date>.csv
+```
+
+Re-scores every run from its saved answer (the trace in `aiops/kira/traces/`,
+or the verbatim copy in `scripts/eval-kira/fixtures/<run>.answers.json`)
+with the current scorer. No fault is re-run, and the original files are left
+untouched; output is `<name>-rescored.csv` / `<name>-rescored.md`, listing
+every changed verdict and every remaining failure.
+
+## Scorer fix (2026-11-28)
+
+**What was wrong.** The model does not always follow the five-heading
+format: some answers start straight with the `**Category:**` line and have no
+`### Root cause` heading, one put only the Category line under Root cause, and
+several used bold pseudo-headings (`**Blast radius:**`) instead of `###`. The
+scorer only recognised `###` headings, found no Root-cause text, and failed
+the **origin** check even when the *Affected services* line marked the correct
+`(origin)`. Its reason message ("origin: expected auth, marked auth") hid which
+condition had actually failed.
+
+**What changed** (`scripts/eval-kira/score.js`): both heading styles are
+recognised (any case); when there is no Root-cause section the text before the
+first heading is used; a correct `(origin)` marker passes unless the Root cause
+names *only other* services (that contradiction still fails); a wrong marker
+still fails; reasons now name the exact failing condition; a non-scoring
+warning flags prose that calls a different service "the origin". Nothing else
+was relaxed — category, evidence and blast-radius checks are unchanged, and a
+test asserts that no answer previously scored correct changes verdict.
+Regression tests use the 34 real answers of the 2026-11-27 run
+(`scripts/eval-kira/score.real-answers.test.js`).
+
+**Effect on the 2026-11-27 20:54 run** (`kira-eval-2026-11-27-2054`, 35 runs):
+7 verdicts changed, all WRONG → CORRECT (F1 run 3, F4 runs 4–5, F5 run 1,
+F6 runs 3–5). **Raw accuracy 19/35 (54%) → corrected 26/35 (74%).** Both
+results are kept: the original `.md`/`.csv` as produced, and
+`kira-eval-2026-11-27-2054-rescored.md`/`.csv`. F6 run 5 passes the four
+checks but is flagged: one sentence of its blast radius calls `order` the
+origin.
+
 ## Known limits of the method
 
 - Pattern-based scoring can be fooled by an answer that names the right

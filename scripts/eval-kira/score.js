@@ -74,15 +74,40 @@ const CATEGORY_KEYWORDS = {
   none: /no active incident/i,
 };
 
-/** Text of a "### Heading" section (until the next ### heading). */
-export function section(answer, heading) {
-  const re = new RegExp(`^#{1,6}\\s*${heading}\\s*$`, 'im');
-  const m = re.exec(answer);
-  if (!m) return '';
-  const rest = answer.slice(m.index + m[0].length);
-  const next = /^#{1,6}\s/m.exec(rest);
-  return (next ? rest.slice(0, next.index) : rest).trim();
+/**
+ * A heading line, in either style the model actually produces:
+ *   "### Blast radius"          (the requested format)
+ *   "**Blast radius:**"         (bold pseudo-heading, on a line of its own)
+ * Case-insensitive. A bold label WITH content on the same line
+ * ("**Category:** code-bug", "- **Affected services:** auth") is not a heading.
+ */
+const HEADING_LINE = /^[ \t]*(?:#{1,6}[ \t]*(.+?)|\*\*([^*\n]+?):?\*\*:?)[ \t]*$/gm;
+
+function headings(answer) {
+  const out = [];
+  for (const m of String(answer).matchAll(HEADING_LINE)) {
+    out.push({ title: (m[1] ?? m[2]).replace(/[*:`]/g, '').trim().toLowerCase(), start: m.index, end: m.index + m[0].length });
+  }
+  return out;
 }
+
+/** Text of a section (until the next heading of either style); '' if the heading is absent. */
+export function section(answer, heading) {
+  const hs = headings(answer);
+  const i = hs.findIndex((h) => h.title === heading.toLowerCase());
+  if (i === -1) return '';
+  const end = hs[i + 1]?.start ?? String(answer).length;
+  return String(answer).slice(hs[i].end, end).trim();
+}
+
+/** Text before the first heading - where the model puts the Category line when it skips "### Root cause". */
+export function preamble(answer) {
+  const hs = headings(answer);
+  return String(answer).slice(0, hs[0]?.start ?? String(answer).length).trim();
+}
+
+/** "the `order` service, which is the origin" - prose naming an origin, for a non-scoring warning. */
+const ORIGIN_CLAIM = /`?([a-z]+)`?(?:\s+service)?,?\s+(?:which|that)?\s*is\s+the\s+origin/gi;
 
 /** The services on the "Affected services:" line, and which one is marked (origin). */
 export function affectedServices(answer) {
@@ -103,10 +128,15 @@ export function scoreAnswer(scenario, answer) {
   const exp = EXPECTATIONS[scenario];
   if (!exp) throw new Error(`no expectation for scenario ${scenario}`);
   const text = String(answer ?? '');
-  const root = section(text, 'Root cause');
+  // The model does not always emit "### Root cause": it sometimes starts
+  // straight with the **Category:** line. Then the text before the first
+  // heading is the closest thing to a root-cause statement.
+  const rootSection = section(text, 'Root cause');
+  const rootMissing = rootSection === '';
+  const root = rootMissing ? preamble(text) : rootSection;
 
-  // 2. category
-  const catLine = /\*\*Category:\*\*\s*`?([a-z-]+)`?/i.exec(root || text);
+  // 2. category ("**Category:** x", also "**Category**: x"; backticks/case tolerated)
+  const catLine = /\*\*Category:?\*\*:?\s*`?([a-z-]+)`?/i.exec(root || text);
   const categoryFound = catLine ? catLine[1].toLowerCase() : null;
   const categoryFallback = !catLine;
   const category_ok = catLine
@@ -114,13 +144,38 @@ export function scoreAnswer(scenario, answer) {
     : CATEGORY_KEYWORDS[exp.category].test(root || text);
 
   // 1. origin
+  //    - an explicit "(origin)" marker on the Affected-services line is the
+  //      model's origin claim: it must be the expected service, and the Root
+  //      cause must not name ONLY other services (a contradiction);
+  //    - without a marker, the Root cause must name the expected service.
+  //    A Root cause that names no service at all (heading missing, or only the
+  //    Category line) does not by itself fail a correctly marked origin.
   const { listed, markedOrigin } = affectedServices(text);
+  const rootNames = servicesIn(root.replace(/\*\*Category:?\*\*:?.*$/im, ''));
   let origin_ok;
+  let originReason = '';
   if (exp.origin === null) {
     origin_ok = /no active incident/i.test(root || text);
+    if (!origin_ok) originReason = 'origin: did not say "no active incident"';
+  } else if (markedOrigin) {
+    const contradicts = rootNames.length > 0 && !rootNames.includes(exp.origin);
+    origin_ok = markedOrigin === exp.origin && !contradicts;
+    if (markedOrigin !== exp.origin) originReason = `origin: expected ${exp.origin}, marked ${markedOrigin}`;
+    else if (contradicts) originReason = `origin: marked ${markedOrigin} but Root cause names only ${rootNames.join(', ')}`;
   } else {
-    origin_ok = nameRe(exp.origin).test(root) && (markedOrigin === null || markedOrigin === exp.origin);
+    origin_ok = rootNames.includes(exp.origin);
+    if (!origin_ok) {
+      originReason = `origin: expected ${exp.origin} not named in Root cause${rootMissing ? ' (no Root cause section)' : ''} and no (origin) marker`;
+    }
   }
+
+  // Non-scoring: prose elsewhere claiming a different origin ("..., which is the origin").
+  const warnings = [];
+  if (exp.origin) {
+    const claims = [...text.matchAll(ORIGIN_CLAIM)].map((m) => m[1].toLowerCase()).filter((s) => SERVICES.includes(s) && s !== exp.origin);
+    if (claims.length) warnings.push(`prose also calls ${[...new Set(claims)].join(', ')} the origin`);
+  }
+  if (rootMissing) warnings.push('no Root cause section (format)');
 
   // 3. evidence
   const evidence_ok = exp.evidence.some((re) => re.test(text));
@@ -132,7 +187,7 @@ export function scoreAnswer(scenario, answer) {
   const checks = { origin_ok, category_ok, evidence_ok, blast_ok };
   const score = Object.values(checks).filter(Boolean).length;
   const reasons = [];
-  if (!origin_ok) reasons.push(exp.origin ? `origin: expected ${exp.origin}${markedOrigin ? `, marked ${markedOrigin}` : ''}` : 'did not say "no active incident"');
+  if (!origin_ok) reasons.push(originReason);
   if (!category_ok) reasons.push(`category: expected ${exp.category}, got ${categoryFound ?? '(no Category line)'}`);
   if (!evidence_ok) reasons.push('no expected evidence cited');
   if (!blast_ok) reasons.push(`wrong services in blast radius: ${wrong.join(', ')}`);
@@ -146,5 +201,6 @@ export function scoreAnswer(scenario, answer) {
     marked_origin: markedOrigin,
     wrong_services: wrong,
     reasons,
+    warnings,
   };
 }

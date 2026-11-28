@@ -24,6 +24,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { scoreAnswer, EXPECTATIONS } from './score.js';
+import { COLUMNS, csvLine, buildSummary } from './report.js';
+import { rescore } from './rescore.js';
 
 const exec = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -39,7 +41,25 @@ const flag = (name) => args.includes(`--${name}`);
 if (flag('help')) {
   console.log('usage: node scripts/eval-kira [--faults HEALTHY,F1,...,F6] [--runs 1..10] [--window 5m]\n' +
     '       [--kira http://localhost:7777] [--prom http://localhost:9091] [--loki http://localhost:3100]\n' +
-    '       [--frontend http://localhost:8090] [--visible-timeout 360] [--recover-timeout 900]');
+    '       [--frontend http://localhost:8090] [--visible-timeout 360] [--recover-timeout 900]\n' +
+    '       node scripts/eval-kira --rescore docs/evaluation/kira-eval-<date>.csv [--traces aiops/kira/traces]');
+  process.exit(0);
+}
+
+// --rescore <csv>: re-score saved answers with the current scorer; no cluster,
+// no Kira server, no fault is touched. Writes <name>-rescored.csv/.md.
+if (opt('rescore', null)) {
+  const csv = opt('rescore', null);
+  const path = /^[A-Za-z]:|^\//.test(csv) ? csv : join(process.cwd(), csv);
+  if (!existsSync(path)) {
+    console.error(`eval-kira: no such CSV ${path}`);
+    process.exit(2);
+  }
+  const tracesOpt = opt('traces', null);
+  const r = rescore(path, { repo: REPO, tracesDir: tracesOpt ? join(process.cwd(), tracesOpt) : null });
+  console.log(`re-scored ${r.runs} run(s): raw ${r.raw}/${r.runs} correct -> corrected ${r.corrected}/${r.runs}; ${r.changed.length} verdict(s) changed`);
+  for (const c of r.changed) console.log(`  ${c.scenario} run ${c.run}: ${c.raw_correct === 'true' ? 'CORRECT' : 'WRONG'} -> ${c.correct ? 'CORRECT' : 'WRONG'}  (raw reason: ${c.raw_reasons})`);
+  console.log(`answers from ${r.sources.trace} trace(s), ${r.sources.fixture} fixture(s)\nwrote ${r.outCsv}\nwrote ${r.outMd}`);
   process.exit(0);
 }
 const ALL = ['HEALTHY', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6'];
@@ -303,56 +323,17 @@ const stamp = new Date().toISOString().slice(0, 16).replace('T', '-').replace(':
 const OUT_DIR = join(REPO, 'docs', 'evaluation');
 const CSV = join(OUT_DIR, `kira-eval-${stamp}.csv`);
 const MD = join(OUT_DIR, `kira-eval-${stamp}.md`);
-const COLUMNS = [
-  'timestamp', 'scenario', 'expected_origin', 'expected_category', 'run', 'correct', 'score',
-  'origin_ok', 'category_ok', 'category_found', 'category_fallback', 'evidence_ok', 'blast_ok', 'wrong_services',
-  'time_to_diagnosis_s', 'time_to_visible_s', 'tool_calls', 'guard', 'partial', 'all_three_signals',
-  'error', 'reasons', 'trace_file', 'answer_excerpt',
-];
-const csvCell = (v) => {
-  const s = Array.isArray(v) ? v.join(' ') : v === null || v === undefined ? '' : String(v);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
 const rows = [];
 function record(row) {
   rows.push(row);
-  appendFileSync(CSV, COLUMNS.map((c) => csvCell(row[c])).join(',') + '\n');
+  appendFileSync(CSV, csvLine(row) + '\n');
 }
 
-function writeSummary(meta) {
-  const by = {};
-  for (const r of rows) (by[r.scenario] ??= []).push(r);
-  const lines = [
-    `# Kira evaluation — ${meta.date}`,
-    '',
-    `- Model: \`${meta.model || 'unknown'}\` · commit \`${meta.commit}\` · ${RUNS} run(s) per scenario · question window: last ${WINDOW}`,
-    `- Scoring: a run is **correct** only if all four checks pass (origin, category, evidence, blast radius) — see [README](README.md).`,
-    `- Raw results: \`${CSV.split(/[\\/]/).pop()}\``,
-    '',
-    '| Scenario | Expected | Runs | Correct | Accuracy | Mean score /4 | Mean time to diagnosis | Time to visible | Notes |',
-    '|---|---|---|---|---|---|---|---|---|',
-  ];
-  let allRuns = 0;
-  let allCorrect = 0;
-  for (const s of SCENARIOS) {
-    const rs = by[s] ?? [];
-    const exp = EXPECTATIONS[s];
-    const correct = rs.filter((r) => r.correct).length;
-    allRuns += rs.length;
-    allCorrect += correct;
-    const timed = rs.filter((r) => Number.isFinite(r.time_to_diagnosis_s));
-    const meanT = timed.length ? (timed.reduce((n, r) => n + r.time_to_diagnosis_s, 0) / timed.length).toFixed(0) + ' s' : '—';
-    const meanScore = rs.length ? (rs.reduce((n, r) => n + (r.score ?? 0), 0) / rs.length).toFixed(2) : '—';
-    const vis = rs[0]?.time_to_visible_s;
-    const reasons = [...new Set(rs.flatMap((r) => (r.reasons ? r.reasons.split('; ') : [])).filter(Boolean))];
-    const notes = rs[0]?.error === 'not_visible'
-      ? 'fault never became visible - runs skipped'
-      : reasons.length ? reasons.slice(0, 3).join('; ') : rs.length ? 'all checks passed' : 'not run';
-    lines.push(`| ${s} | ${exp.origin ?? '—'} / ${exp.category} | ${rs.length} | ${correct} | ${rs.length ? Math.round((100 * correct) / rs.length) + '%' : '—'} | ${meanScore} | ${meanT} | ${Number.isFinite(vis) ? Math.round(vis) + ' s' : '—'} | ${notes.replace(/\|/g, '/')} |`);
-  }
-  lines.push(`| **Overall** | | **${allRuns}** | **${allCorrect}** | **${allRuns ? Math.round((100 * allCorrect) / allRuns) + '%' : '—'}** | | | | |`);
-  lines.push('', `Started ${meta.date}, finished ${new Date().toISOString()}. Failures are results: every run is in the CSV, including the answer excerpt and the reasons a check failed.`, '');
-  writeFileSync(MD, lines.join('\n'));
+function writeSummary(m) {
+  writeFileSync(MD, buildSummary(rows, {
+    scenarios: SCENARIOS, runs: RUNS, window: WINDOW, model: m.model, commit: m.commit, date: m.date,
+    csvName: CSV.split(/[\\/]/).pop(),
+  }));
 }
 
 // ---- main ----------------------------------------------------------------------------
@@ -430,7 +411,7 @@ async function main() {
         time_to_visible_s: Math.round(visibleS), tool_calls: r.toolCalls, guard,
         partial: /Partial investigation|Investigation aborted/.test(r.answer ?? ''),
         all_three_signals: r.summary?.allThreeUsed ?? '', error: r.error ?? '',
-        reasons: (s.reasons ?? []).join('; '), trace_file: r.summary?.file ? String(r.summary.file).split(/[\\/]/).pop() : '',
+        reasons: (s.reasons ?? []).join('; '), warnings: (s.warnings ?? []).join('; '), trace_file: r.summary?.file ? String(r.summary.file).split(/[\\/]/).pop() : '',
         answer_excerpt: String(r.answer ?? '').replace(/\s+/g, ' ').slice(0, 240),
       });
       log(`  run ${run}: ${s.correct ? 'CORRECT' : 'WRONG'} (${s.score}/4, ${Math.round(r.seconds)} s)${s.reasons?.length ? ' - ' + s.reasons.join('; ') : ''}`);
